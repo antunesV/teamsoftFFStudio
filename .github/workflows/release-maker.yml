@@ -1,1 +1,48 @@
+name: Auto Release Maker
 
+on:
+  push:
+    branches:
+      - main # O workflow roda sempre que o AntiGravity envia código para a main
+
+# Permissão obrigatória para que o GitHub Actions consiga criar a Release
+permissions:
+  contents: write 
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      # Prepara o ambiente Flutter (útil se você for compilar o app no futuro)
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      - name: Gerar Tag de Versão
+        id: generate_tag
+        run: |
+          # Cria uma tag única com Ano.Mês.Dia-HoraMinuto
+          TAG_NAME="v$(date +'%Y.%m.%d-%H%M')"
+          echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
+          echo "Tag gerada: $TAG_NAME"
+
+      - name: Compactar o código-fonte para distribuição
+        # Cria um arquivo .zip ignorando a pasta .git oculta para ficar mais leve
+        run: zip -r app-update.zip . -x "*.git*" ".github*"
+
+      - name: Criar GitHub Release e anexar o pacote
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.generate_tag.outputs.tag_name }}
+          name: "Update ${{ steps.generate_tag.outputs.tag_name }}"
+          body: "Atualização automática sincronizada e gerada pelo AntiGravity."
+          files: app-update.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
