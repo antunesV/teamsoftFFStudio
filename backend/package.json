@@ -1,0 +1,31 @@
+{
+  "name": "teamsoft-ff-localrun-backend",
+  "version": "1.0.0",
+  "description": "TeamSoft FF LocalRun Backend",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js",
+    "test": "node test/envManager.test.js && node test/cliResolver.test.js && node test/projectExporter.test.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "chokidar": "^3.5.3",
+    "cors": "^2.8.5",
+    "decompress": "^4.2.1",
+    "decompress-targz": "^4.1.1",
+    "decompress-unzip": "^4.0.1",
+    "express": "^4.18.2",
+    "mime-types": "^2.1.35",
+    "node-fetch": "^2.7.0",
+    "open": "^8.4.2",
+    "progress-stream": "^2.0.0",
+    "protobufjs": "^8.0.0",
+    "socket.io": "^4.7.2",
+    "socket.io-client": "^4.8.3",
+    "tree-kill": "^1.2.2"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}

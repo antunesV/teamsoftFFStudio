@@ -1,0 +1,32 @@
+{
+    "name": "teamsoft-ff-localrun",
+    "version": "3.0.0",
+    "description": "TeamSoft FF LocalRun — FlutterFlow Local Runner + Advanced Debugging Environment",
+    "scripts": {
+        "start": "cd backend && node index.js",
+        "dev": "cd backend && node index.js",
+        "install-backend": "cd backend && npm install",
+        "desktop": "cd electron && npx electron .",
+        "build:win": "cd electron && npx electron-builder --win",
+        "build:mac": "cd electron && npx electron-builder --mac",
+        "setup": "npm run install-backend && npm start"
+    },
+    "engines": {
+        "node": ">=16.0.0"
+    },
+    "keywords": [
+        "flutterflow",
+        "flutter",
+        "debugger",
+        "devtools"
+    ],
+    "author": "TeamSoft",
+    "license": "MIT",
+    "devDependencies": {
+        "socket.io-client": "^4.8.3"
+    },
+    "dependencies": {
+        "protobufjs": "^8.0.0",
+        "ws": "^8.19.0"
+    }
+}

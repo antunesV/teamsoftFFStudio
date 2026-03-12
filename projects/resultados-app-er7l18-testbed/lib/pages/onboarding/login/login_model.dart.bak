@@ -1,0 +1,63 @@
+import '/flutter_flow/flutter_flow_util.dart';
+import '/flutter_flow/flutter_flow_widgets.dart';
+import '/pages/shared/error_msg/error_msg_widget.dart';
+import 'dart:ui';
+import "package:teamsoft_library_8991ti/backend/schema/enums/enums.dart"
+    as teamsoft_library_8991ti_enums;
+import '/custom_code/actions/index.dart' as actions;
+import '/index.dart';
+import 'login_widget.dart' show LoginWidget;
+import 'package:teamsoft_library_8991ti/app_state.dart'
+    as teamsoft_library_8991ti_app_state;
+import 'package:teamsoft_library_8991ti/custom_code/actions/index.dart'
+    as teamsoft_library_8991ti_actions;
+import 'package:easy_debounce/easy_debounce.dart';
+import 'package:ff_theme/flutter_flow/flutter_flow_theme.dart';
+import 'package:flutter/gestures.dart';
+import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
+import 'package:provider/provider.dart';
+
+class LoginModel extends FlutterFlowModel<LoginWidget> {
+  ///  Local state fields for this page.
+
+  dynamic validateData;
+
+  ///  State fields for stateful widgets in this page.
+
+  // State field(s) for PageView widget.
+  PageController? pageViewController;
+
+  int get pageViewCurrentIndex => pageViewController != null &&
+          pageViewController!.hasClients &&
+          pageViewController!.page != null
+      ? pageViewController!.page!.round()
+      : 0;
+  // State field(s) for TextField widget.
+  FocusNode? textFieldFocusNode1;
+  TextEditingController? textController1;
+  String? Function(BuildContext, String?)? textController1Validator;
+  // State field(s) for TextField widget.
+  FocusNode? textFieldFocusNode2;
+  TextEditingController? textController2;
+  late bool passwordVisibility;
+  String? Function(BuildContext, String?)? textController2Validator;
+  // Stores action output result for [Custom Action - validateData] action in Button widget.
+  dynamic? outputValidateData;
+  // Stores action output result for [Custom Action - loginUser] action in Button widget.
+  dynamic? loginOutput;
+
+  @override
+  void initState(BuildContext context) {
+    passwordVisibility = false;
+  }
+
+  @override
+  void dispose() {
+    textFieldFocusNode1?.dispose();
+    textController1?.dispose();
+
+    textFieldFocusNode2?.dispose();
+    textController2?.dispose();
+  }
+}

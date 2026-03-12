@@ -1,0 +1,20 @@
+import '/flutter_flow/flutter_flow_util.dart';
+import '/flutter_flow/flutter_flow_widgets.dart';
+import 'dart:ui';
+import '/custom_code/widgets/index.dart' as custom_widgets;
+import '/index.dart';
+import 'package:teamsoft_library_8991ti/app_state.dart'
+    as teamsoft_library_8991ti_app_state;
+import 'welcome_widget.dart' show WelcomeWidget;
+import 'package:ff_theme/flutter_flow/flutter_flow_theme.dart';
+import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
+import 'package:provider/provider.dart';
+
+class WelcomeModel extends FlutterFlowModel<WelcomeWidget> {
+  @override
+  void initState(BuildContext context) {}
+
+  @override
+  void dispose() {}
+}

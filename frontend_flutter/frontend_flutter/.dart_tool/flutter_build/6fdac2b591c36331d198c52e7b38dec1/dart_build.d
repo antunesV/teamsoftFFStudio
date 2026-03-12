@@ -1,0 +1,1 @@
+ C:\\Users\\vaant\\.gemini\\antigravity\\scratch\\teamsoft-ff-localrun\\frontend_flutter\\frontend_flutter\\.dart_tool\\flutter_build\\6fdac2b591c36331d198c52e7b38dec1\\dart_build_result.json: 

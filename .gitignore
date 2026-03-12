@@ -1,0 +1,38 @@
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Build outputs
+dist/
+build/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Project specific logs and temporary files
+*.log
+errors.txt
+errors.json
+diag_after_stage1.txt
+diag_result.txt
+diag_result_v3.8.txt
+diag_summary.txt
+debug_attach.log
+server_error.log
+logs.txt
+
+# OS files
+.DS_Store
+Thumbs.db
