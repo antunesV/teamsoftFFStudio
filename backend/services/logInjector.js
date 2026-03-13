@@ -1,6 +1,6 @@
 /**
  * logInjector.js — Inject Dart VM Service instrumentation into Flutter source files
- * V5.2 Action Output Isolation + Bulletproof AppState
+ * V5.2 Action Output Isolation + Bulletproof AppState + Universal Network/DB Spy
  */
 
 const fs = require('fs');
@@ -256,21 +256,45 @@ void _initTeamSoftExtensions() {
   return result;
 }
 
+// 🚀 AQUI É O ESPIÃO DA API MELHORADO!
 function injectApiManager(content) {
   if (content.includes("// TS_START_API")) return content;
   let result = safeInjectImport(content, "import 'dart:developer' as developer;");
   result = safeInjectImport(result, "import 'dart:convert';");
   
-  // Injeta o cronômetro e pega o nome da API
   result = result.replace(/(Future<ApiCallResponse>\s+(\w+)\s*\([^)]*\)\s*(?:async)?\s*\{)/g, `$1\n    // TS_START_API\n    final _ts_stopwatch = Stopwatch()..start();\n    final String _ts_method_name = '$2';`);
   
-  // Intercepta o objeto de resposta e joga na rede (Headers e Body)
-  result = result.replace(/return (ApiCallResponse\([^;]+\));/g, (m, args) => `(() { final _r = ${args}; try { developer.postEvent('teamsoft.network', {'duration': _ts_stopwatch.elapsedMilliseconds, 'status': _r.statusCode, 'endpoint': _ts_method_name, 'headers': _r.headers, 'response': _r.bodyText, 'type': 'api_call', 'ts': DateTime.now().millisecondsSinceEpoch}); } catch(_) {} return _r; })()`);
+  result = result.replace(/return (ApiCallResponse\([^;]+\));/g, (m, args) => `(() { final _r = ${args}; try { developer.postEvent('teamsoft.network', {'duration': _ts_stopwatch.elapsedMilliseconds, 'status': _r.statusCode, 'endpoint': _ts_method_name, 'headers': _r.headers, 'response': _r.bodyText, 'type': 'api', 'ts': DateTime.now().millisecondsSinceEpoch}); } catch(_) {} return _r; })()`);
   
-  // Tratamento extra caso o FF use fromHttpResponse no seu projeto
-  result = result.replace(/return (ApiCallResponse\.fromHttpResponse\([^;]+\));/g, (m, args) => `(() { final _r = ${args}; try { developer.postEvent('teamsoft.network', {'duration': _ts_stopwatch.elapsedMilliseconds, 'status': _r.statusCode, 'endpoint': 'HTTP', 'headers': _r.headers, 'response': _r.bodyText, 'type': 'api_call', 'ts': DateTime.now().millisecondsSinceEpoch}); } catch(_) {} return _r; })()`);
+  result = result.replace(/return (ApiCallResponse\.fromHttpResponse\([^;]+\));/g, (m, args) => `(() { final _r = ${args}; try { developer.postEvent('teamsoft.network', {'duration': _ts_stopwatch.elapsedMilliseconds, 'status': _r.statusCode, 'endpoint': 'HTTP', 'headers': _r.headers, 'response': _r.bodyText, 'type': 'api', 'ts': DateTime.now().millisecondsSinceEpoch}); } catch(_) {} return _r; })()`);
   
   return result;
+}
+
+// 🚀 O NOVO ESPIÃO DO SUPABASE/BANCO DE DADOS (V2)
+function injectSupabaseMonitor(content) {
+    if (content.includes("// TS_DB_SPY")) return content;
+    let res = content;
+    res = safeInjectImport(res, "import 'dart:developer' as developer;");
+
+    // Intercepta QUALQUER chamada do Supabase (SupaFlow, Supabase.instance, ou Tables geradas pelo FF)
+    // Envolvendo a chamada original em um .then() para sugar a resposta sem quebrar o código
+    res = res.replace(/await\s+([^;]*(?:SupaFlow|Supabase|Table\(\))[^;]+);/g, (match, query) => {
+        return `await (${query}).then((_res) { 
+            try { 
+                developer.postEvent('teamsoft.network', {
+                    'endpoint': 'DB: Supabase Query', 
+                    'status': 200, 
+                    'duration': 0, 
+                    'response': _res.toString(), 
+                    'type': 'database',
+                    'ts': DateTime.now().millisecondsSinceEpoch
+                }); 
+            } catch(_) {} 
+            return _res; 
+        }); // TS_DB_SPY`;
+    });
+    return res;
 }
 
 function injectFlutterFlowModel(content) {
@@ -469,6 +493,7 @@ function injectWidgetActionOutput(content, filePath) {
   if (!assignmentRegex.test(result)) return result;
   
   result = safeInjectImport(result, "import 'dart:developer' as developer;");
+  // 🚀 AQUI ESTÁ A LINHA CORRIGIDA:
   result = safeInjectImport(result, "import '/flutter_flow/action_registry.dart';");
   
   const widgetClassMatch = result.match(/class\s+(\w+)\s+extends\s+StatefulWidget/);
@@ -488,7 +513,7 @@ function injectWidgetActionOutput(content, filePath) {
 let _cachedPackageName = 'resultados_app';
 
 async function inject(projectDir, onStatus) {
-  onStatus('🧪 TeamSoft FF Studio V5.2 — Action Output Fix...');
+  onStatus('🧪 TeamSoft FF Studio V5.2 — Injecting Everything...');
   let actualRoot = projectDir;
   const mainFiles = findFile(projectDir, 'main.dart');
   if (mainFiles.length > 0) {
@@ -524,7 +549,15 @@ async function inject(projectDir, onStatus) {
     for (const f of files) {
       if (f.includes('flutter_flow_model.dart') && injector !== injectFlutterFlowModel) continue;
       const original = fs.readFileSync(f, 'utf8');
-      const modified = injector(original, f);
+      
+      // 🚀 SE FOR UM ARQUIVO DO SUPABASE, RODA O NOVO INJETOR EXTRA!
+      let modified = original;
+      if (original.includes('supabase') || original.includes('SupabaseClient')) {
+          modified = injectSupabaseMonitor(modified);
+      }
+      
+      modified = injector(modified, f);
+      
       if (modified !== original) {
         backup(f);
         fs.writeFileSync(f, modified, 'utf8');

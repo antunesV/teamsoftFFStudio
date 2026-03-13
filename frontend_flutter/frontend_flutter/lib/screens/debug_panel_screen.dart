@@ -59,6 +59,7 @@ class _DebugPanelScreenState extends State<DebugPanelScreen> {
   @override
   void initState() {
     super.initState();
+    BrowserContextMenu.disableContextMenu();
     final socketService = context.read<SocketService>();
     socketService.connect('auto');
     _fetchPagesTree();
@@ -110,22 +111,6 @@ class _DebugPanelScreenState extends State<DebugPanelScreen> {
         setState(() { _chatHistory.add({'role': 'system', 'text': 'Falha ao acionar Sandin AI: $e'}); _isSandinThinking = false; });
       }
     });
-  }
-
-  Future<void> _sendManualChatMessage() async {
-    final text = _chatInputController.text.trim();
-    if (text.isEmpty) return;
-    _chatInputController.clear();
-    setState(() { _chatHistory.add({'role': 'user', 'text': text}); _isSandinThinking = true; });
-    WidgetsBinding.instance.addPostFrameCallback((_) { if (_chatScroll.hasClients) _chatScroll.jumpTo(_chatScroll.position.maxScrollExtent); });
-    
-    try {
-      final res = await http.post(Uri.parse('http://localhost:3000/api/chat'), headers: {'Content-Type': 'application/json'}, body: jsonEncode({'message': text}));
-      setState(() { _chatHistory.add({'role': 'ai', 'text': jsonDecode(res.body)['analysis']}); _isSandinThinking = false; });
-      WidgetsBinding.instance.addPostFrameCallback((_) { if (_chatScroll.hasClients) _chatScroll.jumpTo(_chatScroll.position.maxScrollExtent); });
-    } catch (e) {
-      setState(() { _isSandinThinking = false; });
-    }
   }
 
   Future<void> _fetchPagesTree() async {
@@ -1074,8 +1059,19 @@ Widget _buildCurrentTabContent() {
                           itemBuilder: (context, index) {
                             final call = calls[index];
                             final status = call['status'] ?? 0;
+                            final type = call['type'] ?? 'api';
+                            
+                            // ✅ As variáveis que o Flutter estava sentindo falta:
                             final isError = status >= 400 || status == 0;
                             final isSelected = _selectedNetworkCall == call;
+
+                            // ✅ A lógica de cores (Azul pro Banco, Vermelho pra Erro, Cinza pro resto)
+                            Color textColor = textSecondary;
+                            if (type == 'database') {
+                                textColor = const Color(0xFF00E5FF); 
+                            } else if (isError) {
+                                textColor = Colors.redAccent;
+                            }
 
                             return InkWell(
                               onTap: () => setState(() => _selectedNetworkCall = call),
@@ -1092,7 +1088,8 @@ Widget _buildCurrentTabContent() {
                                       child: Text('$status', style: TextStyle(color: isError ? Colors.redAccent : Colors.greenAccent, fontSize: 12, fontWeight: FontWeight.bold, fontFamily: 'monospace'))
                                     ),
                                     Expanded(
-                                      child: Text(call['endpoint'] ?? 'Unknown', style: TextStyle(color: isSelected ? textPrimary : (isError ? Colors.redAccent : textSecondary), fontSize: 13, fontWeight: isSelected ? FontWeight.bold : FontWeight.normal), overflow: TextOverflow.ellipsis),
+                                      // Aplicamos o textColor inteligente aqui!
+                                      child: Text(call['endpoint'] ?? 'Unknown', style: TextStyle(color: isSelected ? textPrimary : textColor, fontSize: 13, fontWeight: isSelected ? FontWeight.bold : FontWeight.normal), overflow: TextOverflow.ellipsis),
                                     ),
                                     SizedBox(
                                       width: 60, 

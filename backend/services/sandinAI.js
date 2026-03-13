@@ -9,6 +9,20 @@ const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
 
+const envManager = require('./envManager');
+// ... outros requires ...
+
+// 🚀 NOVO: Leitor nativo de .env (Zero dependências)
+let localEnvApiKey = '';
+try {
+  const envPath = path.join(__dirname, '.env');
+  if (fs.existsSync(envPath)) {
+    const envData = fs.readFileSync(envPath, 'utf8');
+    const match = envData.match(/SANDIN_API_KEY=(.*)/);
+    if (match) localEnvApiKey = match[1].trim();
+  }
+} catch (e) {}
+
 // ─── OFFLINE STATIC CODE LINTER (Fallback) ───────────────────────────────
 const STATIC_CODE_RULES = [
     {
@@ -54,7 +68,7 @@ function analyzeWithRules(message, prompt, code) {
 // ─── GOOGLE GEMINI COPILOT (LLM) ──────────────────────────────────────────
 
 // Sua chave pessoal injetada para uso imediato
-const DEFAULT_GEMINI_KEY = 'AIzaSyBbfelm6AP2hFofaqAlskcfREs-rbuBv6I';
+const apiKey = localEnvApiKey || '';
 
 const COPILOT_SYSTEM_PROMPT = `You are Sandin, a Senior Flutter/Dart & FlutterFlow software engineer and developer copilot.
 
