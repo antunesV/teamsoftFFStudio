@@ -259,9 +259,17 @@ void _initTeamSoftExtensions() {
 function injectApiManager(content) {
   if (content.includes("// TS_START_API")) return content;
   let result = safeInjectImport(content, "import 'dart:developer' as developer;");
+  result = safeInjectImport(result, "import 'dart:convert';");
+  
+  // Injeta o cronômetro e pega o nome da API
   result = result.replace(/(Future<ApiCallResponse>\s+(\w+)\s*\([^)]*\)\s*(?:async)?\s*\{)/g, `$1\n    // TS_START_API\n    final _ts_stopwatch = Stopwatch()..start();\n    final String _ts_method_name = '$2';`);
-  result = result.replace(/return (ApiCallResponse\([^;]+\));/g, (m, args) => `(() { final _r = ${args}; try { developer.postEvent('teamsoft.network', {'duration': _ts_stopwatch.elapsedMilliseconds, 'status': _r.statusCode, 'endpoint': _ts_method_name, 'type': 'api_call', 'ts': DateTime.now().millisecondsSinceEpoch}); } catch(_) {} return _r; })()`);
-  result = result.replace(/return (ApiCallResponse\.fromHttpResponse\([^;]+\));/g, (m, args) => `(() { final _r = ${args}; try { developer.postEvent('teamsoft.network', {'duration': _ts_stopwatch.elapsedMilliseconds, 'status': _r.statusCode, 'endpoint': 'HTTP', 'type': 'http_call', 'ts': DateTime.now().millisecondsSinceEpoch}); } catch(_) {} return _r; })()`);
+  
+  // Intercepta o objeto de resposta e joga na rede (Headers e Body)
+  result = result.replace(/return (ApiCallResponse\([^;]+\));/g, (m, args) => `(() { final _r = ${args}; try { developer.postEvent('teamsoft.network', {'duration': _ts_stopwatch.elapsedMilliseconds, 'status': _r.statusCode, 'endpoint': _ts_method_name, 'headers': _r.headers, 'response': _r.bodyText, 'type': 'api_call', 'ts': DateTime.now().millisecondsSinceEpoch}); } catch(_) {} return _r; })()`);
+  
+  // Tratamento extra caso o FF use fromHttpResponse no seu projeto
+  result = result.replace(/return (ApiCallResponse\.fromHttpResponse\([^;]+\));/g, (m, args) => `(() { final _r = ${args}; try { developer.postEvent('teamsoft.network', {'duration': _ts_stopwatch.elapsedMilliseconds, 'status': _r.statusCode, 'endpoint': 'HTTP', 'headers': _r.headers, 'response': _r.bodyText, 'type': 'api_call', 'ts': DateTime.now().millisecondsSinceEpoch}); } catch(_) {} return _r; })()`);
+  
   return result;
 }
 

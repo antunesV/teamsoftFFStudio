@@ -68,9 +68,7 @@ function run(projectDir, handlers = {}) {
             entry.isCompilationError = true;
         }
 
-        telemetry.log(entry.level, entry.message);
-        onLog(entry);
-
+       
         // ── DevTools URL ──────────────────────────────────────────────
         if (entry.devToolsUrl && !devToolsEmitted) {
             devToolsEmitted = true;
