@@ -1,10 +1,23 @@
-2026/03/12-22:59:41.217 516c Reusing MANIFEST C:\Users\vaant\AppData\Local\Temp\flutter_tools.9f0d117a\flutter_tools_chrome_device.d063e24\Default\shared_proto_db/MANIFEST-000001
-2026/03/12-22:59:41.218 516c Recovering log #13
-2026/03/12-22:59:41.219 516c Reusing old log C:\Users\vaant\AppData\Local\Temp\flutter_tools.9f0d117a\flutter_tools_chrome_device.d063e24\Default\shared_proto_db/000013.log 
-2026/03/12-22:59:41.220 516c Delete type=0 #3
-2026/03/12-22:59:41.220 516c Delete type=0 #4
-2026/03/12-22:59:41.220 516c Delete type=0 #7
-2026/03/12-22:59:41.220 516c Delete type=0 #10
-2026/03/12-23:00:05.817 568 Level-0 table #17: started
-2026/03/12-23:00:05.832 568 Level-0 table #17: 135058 bytes OK
-2026/03/12-23:00:05.855 568 Delete type=0 #13
+2026/03/18-22:39:06.605 3a20 Reusing MANIFEST C:\Users\vaant\AppData\Local\Temp\flutter_tools.cd483725\flutter_tools_chrome_device.f6dd589c\Default\shared_proto_db/MANIFEST-000001
+2026/03/18-22:39:06.606 3a20 Recovering log #39
+2026/03/18-22:39:06.607 3a20 Reusing old log C:\Users\vaant\AppData\Local\Temp\flutter_tools.cd483725\flutter_tools_chrome_device.f6dd589c\Default\shared_proto_db/000039.log 
+2026/03/18-22:39:06.607 3a20 Delete type=0 #3
+2026/03/18-22:39:06.607 3a20 Delete type=0 #4
+2026/03/18-22:39:06.607 3a20 Delete type=0 #7
+2026/03/18-22:39:06.607 3a20 Delete type=2 #8
+2026/03/18-22:39:06.607 3a20 Delete type=0 #10
+2026/03/18-22:39:06.608 3a20 Delete type=2 #11
+2026/03/18-22:39:06.608 3a20 Delete type=0 #13
+2026/03/18-22:39:06.608 3a20 Delete type=2 #14
+2026/03/18-22:39:06.608 3a20 Delete type=0 #16
+2026/03/18-22:39:06.608 3a20 Delete type=2 #17
+2026/03/18-22:39:06.608 3a20 Delete type=0 #19
+2026/03/18-22:39:06.608 3a20 Delete type=2 #21
+2026/03/18-22:39:06.608 3a20 Delete type=0 #23
+2026/03/18-22:39:06.608 3a20 Delete type=2 #24
+2026/03/18-22:39:06.608 3a20 Delete type=0 #26
+2026/03/18-22:39:06.608 3a20 Delete type=2 #27
+2026/03/18-22:39:06.608 3a20 Delete type=0 #29
+2026/03/18-22:39:06.608 3a20 Delete type=2 #30
+2026/03/18-22:39:06.608 3a20 Delete type=0 #32
+2026/03/18-22:39:06.608 3a20 Delete type=0 #36

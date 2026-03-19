@@ -1,48 +1,24 @@
 /**
  * flutterRunner.js — Spawn flutter run -d chrome, capture stdout/stderr,
  * relay stdin commands, emit events.
- *
- * Key additions:
- * - onDebugServiceReady({ port, wsUrl }) — emitted when Flutter debug service is live
- * - onAppReady(url) — emitted when web server URL detected
- * Both replace the old 3s blind setTimeout for instrumentation.
  */
 
 const { spawn } = require('child_process');
 const path = require('path');
 const treeKill = require('tree-kill');
-const logParser = require('./logParser');
 const envManager = require('./envManager');
-const telemetry = require('./telemetry');
 
-/**
- * Run a Flutter project in Chrome.
- *
- * @param {string} projectDir - Absolute path to the Flutter project
- * @param {object} handlers
- *   onLog(entry)                         - called for every log line
- *   onDevToolsUrl(url)                   - called when DevTools URL detected
- *   onDebugServiceReady({ port, wsUrl }) - called when debug service is live ← NEW
- *   onStateUpdate(data)                  - called for AppState events
- *   onApiCall(data)                      - called for ApiManager events
- *   onWidgetUpdate(data)                 - called for WidgetTree events
- *   onAppReady(url)                      - called when web server URL appears
- *   onExit(code)                         - called when process exits
- *
- * @returns {{ sendInput(str), kill(), pid }}
- */
 function run(projectDir, handlers = {}) {
     const {
         onLog = () => { },
         onDevToolsUrl = () => { },
-        onDebugServiceReady = () => { },  // ← NEW
+        onDebugServiceReady = () => { },
         onAppReady = () => { },
         onExit = () => { }
     } = handlers;
 
     const flutterBin = envManager.resolveFlutterBin();
-
-    const args = ['run', '-d', 'chrome', '--no-pub'];
+    const args = ['run', '-d', 'chrome', '--no-pub', '--web-server-debug-protocol=ws'];
     console.log(`[FlutterRunner] spawn: ${flutterBin} ${args.join(' ')} in ${projectDir}`);
 
     const proc = spawn(flutterBin, args, {
@@ -51,75 +27,52 @@ function run(projectDir, handlers = {}) {
         env: { ...process.env }
     });
 
-    let devToolsEmitted = false;
-    let debugServiceEmitted = false;  // ← prevent double-emit
-    let appReadyEmitted = false;
     let lineBuf = '';
+    let lastWsUrl = '';
+
+    // 🚀 CAÇADOR DE WEBSOCKETS AGRESSIVO
+    // Não espera a linha fechar. Caça a URL no exato milissegundo em que ela aparece no fluxo de dados.
+    function scanForWebSockets(rawText) {
+        // Limpa códigos de cor e caracteres de formatação invisíveis do terminal
+        const cleanText = rawText.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '').replace(/\u001b\[\d+m/g, '');
+        
+        // Caça o formato exato: ws://IP:PORTA/QUALQUER_COISA/ws
+        const wsMatches = cleanText.match(/(ws:\/\/[0-9.]+:[0-9]+\/[^ ]+\/ws)/g);
+        
+        if (wsMatches) {
+            wsMatches.forEach(wsUrl => {
+                if (wsUrl !== lastWsUrl) {
+                    lastWsUrl = wsUrl;
+                    const port = wsUrl.split(':')[2].split('/')[0];
+                    console.log(`[FlutterRunner] 🎯 Capturou WebSocket: ${wsUrl}`);
+                    onDebugServiceReady({ port, wsUrl });
+                }
+            });
+        }
+    }
 
     function processLine(rawLine) {
-        const line = rawLine.trim();
-        if (!line) return;
+        const cleanLine = rawLine.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '').trim();
+        if (!cleanLine) return;
 
-        const entry = logParser.parseLine(line);
-
-        // Classify compilation errors
-        if (line.includes('Error:') || line.includes('Failure') || line.includes('Unhandled exception:')) {
-            entry.level = 'error';
-            entry.isCompilationError = true;
+        let level = 'info';
+        if (cleanLine.includes('Error:') || cleanLine.includes('Failure') || cleanLine.includes('Exception')) {
+            level = 'error';
+        } else if (cleanLine.includes('Warning:')) {
+            level = 'warn';
         }
-
-       
-        // ── DevTools URL ──────────────────────────────────────────────
-        if (entry.devToolsUrl && !devToolsEmitted) {
-            devToolsEmitted = true;
-            onDevToolsUrl(entry.devToolsUrl);
-        }
-
-        // ── Debug Service Port ◄ NEW ──────────────────────────────────
-        // "Debug service listening on ws://127.0.0.1:58536/.../ws"
-        if (!debugServiceEmitted) {
-            const ds = logParser.parseDebugServicePort(line);
-            if (ds) {
-                debugServiceEmitted = true;
-                console.log(`[FlutterRunner] Debug service ready: port ${ds.port}, wsUrl ${ds.wsUrl}`);
-                onDebugServiceReady(ds);
-            }
-        }
-
-        // ── App Web Server URL ─────────────────────────────────────────
-        // "http://127.0.0.1:PORT" line signals the Flutter web server is up
-        if (!appReadyEmitted && (line.includes('Serving at') || line.includes('DevTools available at'))) {
-            const match = line.match(/http:\/\/127\.0\.0\.1:(\d+)/);
-            if (match) {
-                appReadyEmitted = true;
-                const port = match[1];
-                const url = `http://localhost:${port}`;
-                onLog({ level: 'info', message: `🌐 Flutter Web server detected: ${url}`, timestamp: Date.now() });
-                onAppReady(url);
-
-                try {
-                    const open = require('open');
-                    open(url);
-                    onLog({ level: 'info', message: '🚀 Chrome launched automatically.', timestamp: Date.now() });
-                } catch (e) {
-                    onLog({ level: 'warn', message: `⚠️ Failed to auto-open Chrome: ${e.message}`, timestamp: Date.now() });
-                }
-            }
-        }
-
-        // ── Supabase log-based detection (optional legacy kept if needed) ──
-        const supabase = logParser.parseSupabaseQuery(line);
-        if (supabase) {
-            telemetry.recordSupabaseQuery('flutter-app', supabase.table, supabase.operation, supabase.duration);
-        }
-
-        // All other telemetry is now handled natively via the Dart VM Service WebSockets.
+        onLog({ level, message: cleanLine, timestamp: Date.now() });
     }
 
     function streamHandler(chunk) {
         const text = chunk.toString();
+        
+        // 1. Escaneia o pacote de dados bruto atrás de URLs antes mesmo de quebrar as linhas
+        scanForWebSockets(text);
+
+        // 2. Acumula e quebra as linhas para o console normal do painel
         lineBuf += text;
-        const lines = lineBuf.split('\n');
+        const lines = lineBuf.split(/\r|\n/);
         lineBuf = lines.pop();
         lines.forEach(processLine);
     }

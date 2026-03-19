@@ -7,23 +7,29 @@ class SocketService extends ChangeNotifier {
   
   final StreamController<Map<String, dynamic>> _stateController = StreamController.broadcast();
   final StreamController<String> _logController = StreamController.broadcast();
-  // 🚀 NOVO: Stream do Network
   final StreamController<List<Map<String, dynamic>>> _networkController = StreamController.broadcast();
   
-  List<Map<String, dynamic>> routeHistory = [];
-  List<Map<String, dynamic>> networkHistory = []; // Memória das Requisições
-  String? currentRoute;
+  List<Map<String, dynamic>> networkHistory = []; 
 
+  // Os getters públicos e seguros
   Stream<Map<String, dynamic>> get stateStream => _stateController.stream;
   Stream<String> get logStream => _logController.stream;
   Stream<List<Map<String, dynamic>>> get networkStream => _networkController.stream;
+  
+  // Fornecemos o getter do socket apenas para o botão "Sync" manual
+  io.Socket? get socket => _socket;
 
   void connect(String url) {
     if (_socket != null) return;
     
+    // 🚀 BLINDAGEM DE CONEXÃO: Tenta reconectar para sempre se o Node.js reiniciar
     _socket = io.io('http://localhost:3000', <String, dynamic>{
       'transports': ['websocket'],
       'autoConnect': true,
+      'reconnection': true,
+      'reconnectionDelay': 1000,
+      'reconnectionDelayMax': 5000,
+      'reconnectionAttempts': 99999,
     });
 
     _socket!.onConnect((_) {
@@ -31,31 +37,27 @@ class SocketService extends ChangeNotifier {
       requestRefresh();
     });
 
+    _socket!.onDisconnect((_) {
+      debugPrint('❌ Desconectado do Backend Node.js. Tentando reconectar...');
+    });
+
     _socket!.on('log-history', (data) {
       if (data is List) for (var log in data) _logController.add(log.toString());
     });
+    
     _socket!.on('log', (data) => _logController.add(data.toString()));
 
-    // 🚀 NOVO: Escuta as chamadas de API em tempo real
     _socket!.on('network-update', (data) {
       if (data is Map) {
-        networkHistory.insert(0, Map<String, dynamic>.from(data)); // Joga pro topo
-        if (networkHistory.length > 50) networkHistory.removeLast(); // Limite de 50 requests
+        networkHistory.insert(0, Map<String, dynamic>.from(data));
+        if (networkHistory.length > 50) networkHistory.removeLast(); 
         _networkController.add(List.from(networkHistory));
       }
     });
 
     _socket!.on('state-snapshot', (data) {
       if (data is Map) {
-        final mapData = Map<String, dynamic>.from(data);
-        final activePage = mapData['active_page'];
-        if (activePage != null && activePage != 'Unknown' && activePage != currentRoute) {
-          currentRoute = activePage;
-          routeHistory.insert(0, {'route': activePage, 'timestamp': DateTime.now()});
-          if (routeHistory.length > 20) routeHistory.removeLast();
-        }
-        mapData['_routeHistory'] = routeHistory;
-        _stateController.add(mapData);
+        _stateController.add(Map<String, dynamic>.from(data));
       }
     });
   }

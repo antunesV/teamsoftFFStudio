@@ -10,16 +10,20 @@ const path = require('path');
 const fs = require('fs');
 
 const envManager = require('./envManager');
-// ... outros requires ...
 
-// 🚀 NOVO: Leitor nativo de .env (Zero dependências)
+// 🚀 Leitor nativo de .env (Zero dependências)
 let localEnvApiKey = '';
 try {
-  const envPath = path.join(__dirname, '.env');
-  if (fs.existsSync(envPath)) {
-    const envData = fs.readFileSync(envPath, 'utf8');
+  // Ajuste fino: Remove aspas caso a chave no .env tenha
+  const envPath = path.join(__dirname, '..', '.env'); // Busca na raiz do backend
+  const altEnvPath = path.join(__dirname, '.env'); // Busca na pasta services
+  
+  const finalEnvPath = fs.existsSync(envPath) ? envPath : (fs.existsSync(altEnvPath) ? altEnvPath : null);
+  
+  if (finalEnvPath) {
+    const envData = fs.readFileSync(finalEnvPath, 'utf8');
     const match = envData.match(/SANDIN_API_KEY=(.*)/);
-    if (match) localEnvApiKey = match[1].trim();
+    if (match) localEnvApiKey = match[1].trim().replace(/['"]/g, '');
   }
 } catch (e) {}
 
@@ -64,11 +68,7 @@ function analyzeWithRules(message, prompt, code) {
     return { analysis: output, findings, source: 'rule-based' };
 }
 
-
 // ─── GOOGLE GEMINI COPILOT (LLM) ──────────────────────────────────────────
-
-// Sua chave pessoal injetada para uso imediato
-const apiKey = localEnvApiKey || '';
 
 const COPILOT_SYSTEM_PROMPT = `You are Sandin, a Senior Flutter/Dart & FlutterFlow software engineer and developer copilot.
 
@@ -85,10 +85,12 @@ RESPONSE RULES:
 
 async function analyzeWithGemini(apiKey, prompt, message, code, onChunk) {
     const userContent = prompt || message || code || 'Faça um Code Review do código fornecido.';
-    const actualKey = apiKey && apiKey.startsWith('AIza') ? apiKey : DEFAULT_GEMINI_KEY;
+    const actualKey = apiKey && apiKey.startsWith('AIza') ? apiKey : localEnvApiKey;
 
-    // URL usando SSE (Server-Sent Events) para Streaming em Tempo Real
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:streamGenerateContent?alt=sse&key=${actualKey}`;
+    if (!actualKey) throw new Error("Nenhuma API Key válida foi encontrada.");
+
+    // Usando a versão estável e gratuita mais inteligente (Gemini 2.5 Flash)
+const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key=${actualKey}`;
 
     const payload = {
         systemInstruction: { parts: [{ text: COPILOT_SYSTEM_PROMPT }] },
@@ -129,7 +131,7 @@ async function analyzeWithGemini(apiKey, prompt, message, code, onChunk) {
 
 // ─── MAIN ENTRY POINT ─────────────────────────────────────────────────────
 async function analyze({ message, prompt, code, logs = [], apiKey = '', onChunk }) {
-    const actualKey = apiKey || DEFAULT_GEMINI_KEY;
+    const actualKey = apiKey || localEnvApiKey;
 
     // 1. Tenta usar o cérebro do Gemini
     if (actualKey && actualKey.startsWith('AIza')) {
@@ -138,6 +140,8 @@ async function analyze({ message, prompt, code, logs = [], apiKey = '', onChunk 
         } catch (err) {
             console.warn('[Sandin] Falha no Gemini. Caindo para o Linter Offline:', err.response?.data || err.message);
         }
+    } else {
+        console.warn('[Sandin] Sem API Key válida detectada. Usando Linter Offline.');
     }
 
     // 2. Fallback: Linter Offline super rápido caso a internet/API falhe

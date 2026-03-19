@@ -1,5 +1,5 @@
 import 'dart:ui';
-import 'dart:async'; // 🚀 ADICIONE ESTA LINHA AQUI!
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -16,45 +16,110 @@ class DebugPanelScreen extends StatefulWidget {
 
 class _DebugPanelScreenState extends State<DebugPanelScreen> {
   final TextEditingController _searchController = TextEditingController();
+  String _searchQuery = '';
   
   final Color bgBlack = const Color(0xFF09090B);
   final Color panelGray = const Color(0xFF141417);
   final Color accentYellow = const Color(0xFFFFD600);
   final Color textPrimary = const Color(0xFFE4E4E7);
   final Color textSecondary = const Color(0xFFA1A1AA);
-
-  // Variáveis
-  String? _selectedKey;
-  dynamic _selectedValue;
-  String? _selectedCategory;
   
-  // Custom Code
+  Map<String, dynamic> _appState = {};
+  Map<String, dynamic> _authState = {};
+  Map<String, dynamic> _widgetStates = {};
+  Map<String, dynamic> _pageStates = {};
+  Map<String, dynamic> _actionOutputs = {};
+  String _activePage = 'Unknown';
+  
+  bool _isConnected = false;
+  String? _isolateId;
+
   int _currentTabIndex = 0;
   List<dynamic> _customCodeFiles = [];
   bool _isLoadingCode = false;
   Map<String, dynamic>? _selectedCodeFile;
 
-  // IA
   bool _isAnalyzingCode = false;
   String? _aiAnalysisResult;
 
-// 🚀 Árvore de Páginas, Componentes e Rotas
   List<dynamic> _pagesTree = [];
   List<dynamic> _componentsTree = [];
   String? _selectedRoute;
 
-  // 🚀 Monitor do Console & Sandin AI
   List<String> _consoleLogs = [];
   List<Map<String, dynamic>> _chatHistory = [];
   final ScrollController _consoleScroll = ScrollController();
   final ScrollController _chatScroll = ScrollController();
   final TextEditingController _chatInputController = TextEditingController();
   bool _isSandinThinking = false;
+  bool _isSandinAIOpen = false; 
   String _currentErrorContext = '';
   Timer? _errorDebounceTimer;
+  Timer? _emptyStateDebounceTimer;
 
-  // Variável do Network
   Map<String, dynamic>? _selectedNetworkCall;
+  List<Map<String, dynamic>> _networkCalls = [];
+
+  bool _mapEquals(Map<String, dynamic> a, Map<String, dynamic> b) {
+    if (identical(a, b)) return true;
+    if (a.length != b.length) return false;
+    for (final entry in a.entries) {
+      final key = entry.key;
+      if (!b.containsKey(key)) return false;
+      if (entry.value?.toString() != b[key]?.toString()) return false;
+    }
+    return true;
+  }
+
+  void _applyStateSnapshot({
+    required Map<String, dynamic> nextWidget,
+    required Map<String, dynamic> nextPage,
+    required Map<String, dynamic> nextActions,
+    required Map<String, dynamic> nextApp,
+    required Map<String, dynamic> nextAuth,
+    required String nextActive,
+    required dynamic nextIsolateId,
+  }) {
+    // Prevent rapid non-empty <-> empty oscillation from causing visual "blink".
+    final wantsToClear =
+        (nextWidget.isEmpty && _widgetStates.isNotEmpty) ||
+        (nextPage.isEmpty && _pageStates.isNotEmpty) ||
+        (nextActions.isEmpty && _actionOutputs.isNotEmpty);
+
+    if (wantsToClear) {
+      _emptyStateDebounceTimer?.cancel();
+      _emptyStateDebounceTimer = Timer(const Duration(milliseconds: 600), () {
+        if (!mounted) return;
+        setState(() {
+          _widgetStates = nextWidget;
+          _pageStates = nextPage;
+          _actionOutputs = nextActions;
+          _appState = nextApp;
+          _authState = nextAuth;
+          _activePage = nextActive;
+          if (nextIsolateId != null) {
+            _isolateId = nextIsolateId;
+            _isConnected = _isolateId != 'disconnected';
+          }
+        });
+      });
+      return;
+    }
+
+    _emptyStateDebounceTimer?.cancel();
+    setState(() {
+      _widgetStates = nextWidget;
+      _pageStates = nextPage;
+      _actionOutputs = nextActions;
+      _appState = nextApp;
+      _authState = nextAuth;
+      _activePage = nextActive;
+      if (nextIsolateId != null) {
+        _isolateId = nextIsolateId;
+        _isConnected = _isolateId != 'disconnected';
+      }
+    });
+  }
 
   @override
   void initState() {
@@ -63,20 +128,27 @@ class _DebugPanelScreenState extends State<DebugPanelScreen> {
     final socketService = context.read<SocketService>();
     socketService.connect('auto');
     _fetchPagesTree();
-    
-    // 🚀 O VIGILANTE: Escuta o console e procura por erros!
+    _setupSocketListeners();
+    _searchController.addListener(() {
+      setState(() {
+        _searchQuery = _searchController.text.trim();
+      });
+    });
+  }
+
+  void _setupSocketListeners() {
+    final socketService = context.read<SocketService>();
+
     socketService.logStream.listen((logStr) {
+      if (!mounted) return;
       setState(() {
         _consoleLogs.add(logStr);
-        if (_consoleLogs.length > 300) _consoleLogs.removeAt(0); // Mantém limite de linhas
+        if (_consoleLogs.length > 300) _consoleLogs.removeAt(0);
       });
-      
-      // Desce o scroll automaticamente
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (_consoleScroll.hasClients) _consoleScroll.jumpTo(_consoleScroll.position.maxScrollExtent);
       });
 
-      // LÓGICA DE INTERCEPTAÇÃO: Se for um erro, o Sandin entra em ação!
       if (logStr.contains('EXCEPTION CAUGHT') || logStr.contains('Error:') || logStr.contains('Exception:')) {
         _currentErrorContext += logStr + '\n';
         _triggerAutoAnalyzeError();
@@ -85,17 +157,71 @@ class _DebugPanelScreenState extends State<DebugPanelScreen> {
         _triggerAutoAnalyzeError();
       }
     });
+
+    socketService.stateStream.listen((data) {
+      if (!mounted) return;
+      final widgetStateRaw = data['WIDGET STATE'];
+      final nextWidget = (widgetStateRaw is Map && widgetStateRaw.isNotEmpty)
+          ? Map<String, dynamic>.from(widgetStateRaw)
+          : <String, dynamic>{};
+
+      final pageStateRaw = data['PAGE STATE'];
+      final nextPage = (pageStateRaw is Map && pageStateRaw.isNotEmpty)
+          ? Map<String, dynamic>.from(pageStateRaw)
+          : <String, dynamic>{};
+
+      final actionOutputsRaw = data['ACTION OUTPUTS'];
+      final nextActions = (actionOutputsRaw is Map && actionOutputsRaw.isNotEmpty)
+          ? Map<String, dynamic>.from(actionOutputsRaw)
+          : <String, dynamic>{};
+
+      final nextApp = Map<String, dynamic>.from(data['APPLICATION STATE'] ?? {});
+      final nextAuth = Map<String, dynamic>.from(data['AUTHENTICATION'] ?? {});
+      final nextActive = data['active_page'] ?? 'Unknown';
+
+      final didChange = !_mapEquals(_widgetStates, nextWidget) ||
+          !_mapEquals(_pageStates, nextPage) ||
+          !_mapEquals(_actionOutputs, nextActions) ||
+          !_mapEquals(_appState, nextApp) ||
+          !_mapEquals(_authState, nextAuth) ||
+          _activePage != nextActive ||
+          _isolateId != data['isolateId'];
+
+      if (!didChange) return;
+
+      _applyStateSnapshot(
+        nextWidget: nextWidget,
+        nextPage: nextPage,
+        nextActions: nextActions,
+        nextApp: nextApp,
+        nextAuth: nextAuth,
+        nextActive: nextActive,
+        nextIsolateId: data['isolateId'],
+      );
+    });
+
+    socketService.networkStream.listen((calls) {
+      if (!mounted) return;
+      setState(() {
+        for (var data in calls) {
+            final parsed = Map<String, dynamic>.from(data);
+            final String uniqueId = "${parsed['ts']}_${UniqueKey().toString()}";
+            parsed['id'] = uniqueId; 
+            _networkCalls.insert(0, parsed);
+        }
+      });
+    });
   }
 
-  // Agrupa as linhas do erro (Stack Trace) antes de enviar para a IA
   void _triggerAutoAnalyzeError() {
     _errorDebounceTimer?.cancel();
     _errorDebounceTimer = Timer(const Duration(milliseconds: 1500), () async {
       final errorToAnalyze = _currentErrorContext;
-      _currentErrorContext = ''; // Reseta
+      _currentErrorContext = '';
       if (errorToAnalyze.trim().isEmpty) return;
 
       setState(() {
+        _isSandinAIOpen = true; 
         _chatHistory.add({'role': 'system', 'text': '🚨 Erro crítico interceptado no console. O Sandin está investigando o código fonte...'});
         _isSandinThinking = true;
       });
@@ -122,9 +248,7 @@ class _DebugPanelScreenState extends State<DebugPanelScreen> {
           _componentsTree = jsonDecode(res.body)['components'] ?? [];
         });
       }
-    } catch (e) {
-      debugPrint('Erro ao buscar pages tree: $e');
-    }
+    } catch (e) {}
   }
 
   Future<void> _fetchCustomCode() async {
@@ -155,24 +279,176 @@ class _DebugPanelScreenState extends State<DebugPanelScreen> {
     }
   }
 
+  bool _isSystemLog(String log) {
+    final l = log.toLowerCase();
+    return l.contains('[loginjector]') || 
+           l.contains('protocol buffers') || 
+           l.contains('vm info:') || 
+           l.contains('attached to isolate') || 
+           l.contains('connected to dart vm') ||
+           l.contains('debug service listening') ||
+           l.contains('this app is linked to');
+  }
+
+  Future<void> _sendManualChatMessage({String? prefixContext}) async {
+    final text = _chatInputController.text.trim();
+    if (text.isEmpty && prefixContext == null) return;
+    
+    final displayMessage = text.isNotEmpty ? text : 'Analise este log/variável.';
+    final promptToSend = prefixContext != null ? "$prefixContext\n\n$text" : text;
+    
+    _chatInputController.clear();
+    setState(() { 
+      _isSandinAIOpen = true; 
+      _chatHistory.add({'role': 'user', 'text': displayMessage}); 
+      _isSandinThinking = true; 
+    });
+    
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (_chatScroll.hasClients) _chatScroll.jumpTo(_chatScroll.position.maxScrollExtent); });
+    
+    try {
+      final res = await http.post(
+        Uri.parse('http://localhost:3000/api/chat'), 
+        headers: {'Content-Type': 'application/json'}, 
+        body: jsonEncode({'message': promptToSend})
+      );
+      setState(() { 
+        _chatHistory.add({'role': 'ai', 'text': jsonDecode(res.body)['analysis']}); 
+        _isSandinThinking = false; 
+      });
+      WidgetsBinding.instance.addPostFrameCallback((_) { if (_chatScroll.hasClients) _chatScroll.jumpTo(_chatScroll.position.maxScrollExtent); });
+    } catch (e) {
+      setState(() { _isSandinThinking = false; });
+    }
+  }
+
+  void _showLogContextMenu(BuildContext context, Offset position, String logLine) {
+    showMenu(
+      context: context,
+      position: RelativeRect.fromLTRB(position.dx, position.dy, position.dx, position.dy),
+      color: panelGray,
+      elevation: 8,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8), side: BorderSide(color: Colors.white.withOpacity(0.1))),
+      items: [
+        PopupMenuItem(
+          value: 'copy',
+          child: Row(children: [Icon(Icons.copy, size: 16, color: textPrimary), const SizedBox(width: 8), Text('Copiar Linha', style: TextStyle(color: textPrimary, fontSize: 13))]),
+        ),
+        PopupMenuItem(
+          value: 'ask',
+          child: Row(children: [Icon(Icons.psychology, size: 16, color: accentYellow), const SizedBox(width: 8), Text('Perguntar ao Sandin', style: TextStyle(color: accentYellow, fontSize: 13, fontWeight: FontWeight.bold))]),
+        ),
+      ],
+    ).then((value) {
+      if (value == 'copy') {
+        Clipboard.setData(ClipboardData(text: logLine));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Linha copiada!', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)), backgroundColor: accentYellow, duration: const Duration(seconds: 2)));
+      } else if (value == 'ask') {
+        _sendManualChatMessage(prefixContext: "Por favor, explique e me ajude a resolver este log que apareceu no meu console do Flutter:\n\n```text\n$logLine\n```");
+      }
+    });
+  }
+
+  String _formatJson(dynamic input) {
+    if (input == null) return 'null';
+    if (input is Map || input is List) return const JsonEncoder.withIndent('  ').convert(input);
+    try {
+      final decoded = jsonDecode(input.toString());
+      return const JsonEncoder.withIndent('  ').convert(decoded);
+    } catch (_) {
+      return input.toString();
+    }
+  }
+
+  // 🚀 O NOVO LEITOR DE CÓDIGO (JSON VIEWER COM LINHAS E ZEBRA)
+  Widget _buildJsonViewer(String data) {
+    if (data.isEmpty) return const SizedBox();
+    final lines = data.split('\n');
+    
+    return Container(
+      color: const Color(0xFF1E1E1E), // Cor base de editor
+      child: ListView.builder(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        itemCount: lines.length,
+        itemBuilder: (context, index) {
+          final line = lines[index];
+          final isEven = index % 2 == 0;
+          return Container(
+            color: isEven ? Colors.white.withOpacity(0.02) : Colors.transparent, // Zebra Striping
+            padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 8),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SizedBox(
+                  width: 32,
+                  child: Text(
+                    '${index + 1}',
+                    style: TextStyle(color: textSecondary.withOpacity(0.4), fontSize: 12, fontFamily: 'monospace'),
+                    textAlign: TextAlign.right,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Container(width: 1, color: Colors.white.withOpacity(0.05)), // Guia Vertical
+                const SizedBox(width: 12),
+                Expanded(
+                  child: SelectableText(
+                    line,
+                    style: const TextStyle(color: Color(0xFFCE9178), fontSize: 13, fontFamily: 'monospace', height: 1.4),
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: bgBlack,
-      body: Row(
+      body: Stack(
         children: [
-          _buildSideNav(),
-          Expanded(
-            child: Column(
-              children: [
-                _buildGlassHeader(context),
-                Expanded(child: _buildCurrentTabContent()),
-              ],
-            ),
+          Row(
+            children: [
+              _buildSideNav(),
+              Expanded(
+                child: Column(
+                  children: [
+                    _buildGlassHeader(context),
+                    Expanded(child: _buildCurrentTabContent()),
+                  ],
+                ),
+              ),
+            ],
           ),
+          if (_isSandinAIOpen)
+            Positioned.fill(
+              child: GestureDetector(
+                onTap: () => setState(() => _isSandinAIOpen = false),
+                child: Container(color: Colors.black.withOpacity(0.6)),
+              ),
+            ),
+          if (_isSandinAIOpen)
+            Positioned(
+              right: 0, top: 0, bottom: 0,
+              child: _buildSandinAIPanel(),
+            ),
         ],
       ),
     );
+  }
+
+  @override
+  void dispose() {
+    _emptyStateDebounceTimer?.cancel();
+    _errorDebounceTimer?.cancel();
+    _searchController.dispose();
+    _chatInputController.dispose();
+    _consoleScroll.dispose();
+    _chatScroll.dispose();
+    super.dispose();
   }
 
   Widget _buildSideNav() {
@@ -186,8 +462,20 @@ class _DebugPanelScreenState extends State<DebugPanelScreen> {
           _buildNavButton(0, Icons.data_object, 'Variáveis de Estado'),
           _buildNavButton(1, Icons.account_tree_rounded, 'Árvore de Páginas/Widgets'),
           _buildNavButton(2, Icons.code_rounded, 'Custom Code Explorer'),
-          _buildNavButton(3, Icons.terminal_rounded, 'Console & Sandin AI Copilot'),
-          _buildNavButton(4, Icons.wifi_tethering_rounded, 'Network Inspector'), // NOVO!
+          _buildNavButton(3, Icons.terminal_rounded, 'Console do App'),
+          _buildNavButton(4, Icons.wifi_tethering_rounded, 'Network Inspector'),
+          const Spacer(),
+          Tooltip(
+            message: 'Sandin AI Copilot',
+            child: InkWell(
+              onTap: () => setState(() => _isSandinAIOpen = !_isSandinAIOpen),
+              child: Container(
+                width: 64, padding: const EdgeInsets.symmetric(vertical: 20),
+                decoration: BoxDecoration(color: _isSandinAIOpen ? accentYellow.withOpacity(0.1) : Colors.transparent),
+                child: Icon(Icons.psychology_rounded, color: accentYellow, size: 28),
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -212,146 +500,366 @@ class _DebugPanelScreenState extends State<DebugPanelScreen> {
     );
   }
 
-Widget _buildCurrentTabContent() {
+  Widget _buildCurrentTabContent() {
     if (_currentTabIndex == 1) return _buildWidgetTreeTab();
     if (_currentTabIndex == 2) return _buildCustomCodeTab();
-    if (_currentTabIndex == 3) return _buildConsoleAndAITab();
-    if (_currentTabIndex == 4) return _buildNetworkTab(); // A NOVA ABA!
+    if (_currentTabIndex == 3) return _buildConsoleTab();
+    if (_currentTabIndex == 4) return _buildNetworkTab();
     return _buildVariableInspectorTab();
   }
 
   // ==========================================
-  // 🚀 ABA 2: WIDGET TREE & ROUTE INSPECTOR
+  // ABA 1: STATE INSPECTOR (Variáveis)
   // ==========================================
-  Widget _buildWidgetTreeTab() {
-    return StreamBuilder<Map<String, dynamic>>(
-      stream: context.watch<SocketService>().stateStream,
-      builder: (context, snapshot) {
-        if (_pagesTree.isEmpty && _componentsTree.isEmpty) {
-          return Center(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                CircularProgressIndicator(color: accentYellow),
-                const SizedBox(height: 16),
-                Text('Mapeando as páginas do seu projeto...', style: TextStyle(color: textSecondary)),
-              ]
-            )
-          );
-        }
+  Widget _buildVariableInspectorTab() {
+    if (!_isConnected) return _buildLoadingState();
 
-        final data = snapshot.data ?? {};
-        final activePageStr = data['active_page'] ?? '';
-        final activeRouteName = activePageStr.replaceAll('Model', '').replaceAll('Widget', '');
-        
-        final displayRoute = _selectedRoute ?? (activeRouteName.isNotEmpty ? activeRouteName : (_pagesTree.isNotEmpty ? _pagesTree.first['route'] : ''));
-        
-        // Busca a árvore na lista de páginas ou de componentes
-        Map<String, dynamic>? selectedPageData;
-        try { selectedPageData = _pagesTree.firstWhere((p) => p['route'] == displayRoute); } 
-        catch (_) {
-          try { selectedPageData = _componentsTree.firstWhere((p) => p['route'] == displayRoute); } 
-          catch (_) { selectedPageData = _pagesTree.isNotEmpty ? _pagesTree.first : null; }
-        }
-        
-        final treeNodes = selectedPageData?['tree'] as List<dynamic>? ?? [];
-
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // PAINEL ESQUERDO: LISTA SEPARADA DE PÁGINAS E COMPONENTES
-              Expanded(
-                flex: 3,
-                child: Container(
-                  decoration: BoxDecoration(color: panelGray, borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.white.withOpacity(0.05))),
-                  clipBehavior: Clip.antiAlias,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-                        color: Colors.black.withOpacity(0.2),
-                        child: Row(
-                          children: [
-                            Icon(Icons.route_rounded, color: accentYellow, size: 18),
-                            const SizedBox(width: 8),
-                            Text('Estrutura do App', style: TextStyle(color: textPrimary, fontWeight: FontWeight.bold, fontSize: 13)),
-                          ],
-                        ),
-                      ),
-                      Expanded(
-                        child: ListView(
-                          padding: const EdgeInsets.symmetric(vertical: 8),
-                          children: [
-                            if (_pagesTree.isNotEmpty)
-                              _buildRouteGroup('Páginas', _pagesTree, activeRouteName, displayRoute, Icons.web_asset_rounded),
-                            if (_componentsTree.isNotEmpty)
-                              _buildRouteGroup('Componentes', _componentsTree, activeRouteName, displayRoute, Icons.extension_rounded),
-                          ],
-                        ),
-                      )
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(width: 16),
-              
-              // PAINEL DIREITO: A WIDGET TREE COM SCROLL DUPLO (2D)
-              Expanded(
-                flex: 5,
-                child: Container(
-                  decoration: BoxDecoration(color: panelGray, borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.white.withOpacity(0.05))),
-                  clipBehavior: Clip.antiAlias,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-                        color: Colors.black.withOpacity(0.2),
-                        child: Row(
-                          children: [
-                            Icon(Icons.account_tree_rounded, color: accentYellow, size: 18),
-                            const SizedBox(width: 8),
-                            Text('Widget Tree real: ', style: TextStyle(color: textSecondary, fontSize: 13)),
-                            Text(displayRoute, style: TextStyle(color: textPrimary, fontWeight: FontWeight.bold, fontSize: 13, fontFamily: 'monospace')),
-                          ],
-                        ),
-                      ),
-                      Expanded(
-                        child: Container(
-                          color: bgBlack.withOpacity(0.3),
-                          child: treeNodes.isEmpty 
-                          ? Center(child: Text('Nenhuma árvore de widgets detectada.', style: TextStyle(color: textSecondary)))
-                          // 🚀 O SEGREDO DO SCROLL 2D: Um scroll vertical englobando um scroll horizontal
-                          : SingleChildScrollView(
-                              scrollDirection: Axis.vertical,
-                              child: SingleChildScrollView(
-                                scrollDirection: Axis.horizontal,
-                                padding: const EdgeInsets.all(24),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: treeNodes.map((node) {
-                                    return _buildTreeNode(node['name'], node['depth']);
-                                  }).toList(),
-                                ),
-                              ),
-                            ),
-                        ),
-                      )
-                    ],
-                  ),
-                ),
-              )
-            ],
-          ),
-        );
-      },
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+      child: Container(
+        decoration: BoxDecoration(
+          color: panelGray, 
+          borderRadius: BorderRadius.circular(16), 
+          border: Border.all(color: Colors.white.withOpacity(0.05)),
+          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.5), blurRadius: 10, offset: const Offset(0, 4))]
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: ListView(
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          children: [
+            _buildCategoryList('ACTION OUTPUTS', _actionOutputs),
+            _buildCategoryList('WIDGET STATE', _widgetStates),
+            _buildCategoryList('PAGE STATE', _pageStates),
+            _buildCategoryList('APPLICATION STATE', _appState),
+            _buildCategoryList('AUTHENTICATION', _authState),
+          ],
+        ),
+      ),
     );
   }
 
-  // Helper para construir as pastas da lateral
+  Widget _buildCategoryList(String title, Map<String, dynamic> mapData) {
+    final query = _searchQuery.toLowerCase();
+    final entries = query.isEmpty
+        ? mapData.entries.toList()
+        : mapData.entries
+            .where((e) =>
+                e.key.toLowerCase().contains(query) ||
+                (e.value?.toString().toLowerCase().contains(query) ?? false))
+            .toList();
+    final bool hasItems = entries.isNotEmpty;
+    return Theme(
+      data: ThemeData(dividerColor: Colors.transparent),
+      child: ExpansionTile(
+        key: PageStorageKey<String>('category_$title'),
+        initiallyExpanded: true,
+        iconColor: accentYellow, 
+        collapsedIconColor: textSecondary, 
+        tilePadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 0), 
+        leading: Icon(Icons.folder_copy_rounded, color: accentYellow.withOpacity(0.8), size: 18),
+        title: Row(
+          children: [
+            Expanded(child: Text(title, style: TextStyle(color: textPrimary, fontWeight: FontWeight.bold, fontSize: 12, letterSpacing: 0.5), overflow: TextOverflow.ellipsis)), 
+            const SizedBox(width: 8), 
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2), 
+              decoration: BoxDecoration(color: Colors.white.withOpacity(0.1), borderRadius: BorderRadius.circular(10)), 
+              child: Text('${mapData.length}', style: TextStyle(color: textSecondary, fontSize: 10, fontWeight: FontWeight.bold))
+            )
+          ]
+        ),
+        children: hasItems
+            ? entries.map((e) => _buildListItem(title, e.key, e.value)).toList()
+            : [
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                  child: Text(
+                    'Vazio',
+                    style: TextStyle(
+                      color: textSecondary.withOpacity(0.5),
+                      fontFamily: 'monospace',
+                      fontSize: 12,
+                    ),
+                  ),
+                ),
+              ],
+      ),
+    );
+  }
+
+  Widget _buildListItem(String category, String key, dynamic value) {
+    String previewText = value?.toString() ?? 'Vazio';
+    
+    if (value == null) {
+      previewText = 'Vazio';
+    } else if (value is String && value.isEmpty) {
+      previewText = 'Vazio';
+    } else if (value is Map) {
+      previewText = value.isEmpty ? 'Vazio' : '{ ... }';
+    } else if (value is List) {
+      previewText = value.isEmpty ? 'Vazio' : '[ ... ]';
+    }
+
+    bool isEmptyVal = previewText == 'Vazio';
+
+    return InkWell(
+      onTap: () => _showValueModal(context, category, key, value),
+      hoverColor: Colors.white.withOpacity(0.02),
+      child: Container(
+        decoration: BoxDecoration(border: Border(bottom: BorderSide(color: Colors.white.withOpacity(0.02)))),
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+        child: Row(
+          children: [
+            const SizedBox(width: 14), 
+            _getTypeBadge(value), 
+            const SizedBox(width: 12), 
+            Expanded(
+              flex: 2,
+              child: Text(key, style: TextStyle(color: textPrimary, fontSize: 13, fontFamily: 'monospace', fontWeight: FontWeight.w600), maxLines: 1, overflow: TextOverflow.ellipsis)
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              flex: 3,
+              child: Text(
+                previewText, 
+                style: TextStyle(
+                  color: isEmptyVal ? textSecondary.withOpacity(0.4) : textSecondary, 
+                  fontSize: 12, 
+                  fontFamily: 'monospace', 
+                  fontStyle: isEmptyVal ? FontStyle.italic : FontStyle.normal
+                ), 
+                maxLines: 1, 
+                overflow: TextOverflow.ellipsis, 
+                textAlign: TextAlign.right
+              )
+            ),
+            const SizedBox(width: 8),
+            Icon(Icons.open_in_new_rounded, size: 14, color: textSecondary.withOpacity(0.5))
+          ]
+        ),
+      ),
+    );
+  }
+
+  Widget _getTypeBadge(dynamic value) {
+    String typeStr = 'null'; Color badgeColor = Colors.grey[700]!;
+    if (value != null) {
+      if (value is String) { typeStr = 'str'; badgeColor = const Color(0xFF4EC9B0); } 
+      else if (value is bool) { typeStr = 'bool'; badgeColor = const Color(0xFFC586C0); } 
+      else if (value is int || value is double || num.tryParse(value.toString()) != null) { typeStr = 'num'; badgeColor = const Color(0xFFB5CEA8); } 
+      else if (value is List) { typeStr = 'list'; badgeColor = const Color(0xFF4CA1FE); } 
+      else if (value is Map) { typeStr = 'map'; badgeColor = accentYellow; } 
+      else { typeStr = 'obj'; badgeColor = Colors.orangeAccent; }
+    }
+    return Container(width: 40, padding: const EdgeInsets.symmetric(vertical: 3), decoration: BoxDecoration(color: badgeColor.withOpacity(0.15), borderRadius: BorderRadius.circular(6), border: Border.all(color: badgeColor.withOpacity(0.3))), alignment: Alignment.center, child: Text(typeStr, style: TextStyle(color: badgeColor, fontSize: 10, fontWeight: FontWeight.w700, fontFamily: 'monospace')));
+  }
+
+  void _showValueModal(BuildContext context, String category, String key, dynamic value) {
+    String displayValue = '';
+    if (value is Map || value is List) {
+      displayValue = const JsonEncoder.withIndent('  ').convert(value);
+    } else {
+      displayValue = value?.toString() ?? 'Vazio';
+    }
+
+    showDialog(
+      context: context,
+      builder: (BuildContext ctx) {
+        return Dialog(
+          backgroundColor: panelGray,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16), side: BorderSide(color: accentYellow.withOpacity(0.3))),
+          child: Container(
+            width: 700, 
+            constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.85),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16), 
+                  decoration: BoxDecoration(color: Colors.black.withOpacity(0.2), border: Border(bottom: BorderSide(color: Colors.white.withOpacity(0.05))), borderRadius: const BorderRadius.vertical(top: Radius.circular(16))),
+                  child: Row(
+                    children: [
+                      _getTypeBadge(value), 
+                      const SizedBox(width: 12), 
+                      Expanded(child: Text(key, style: TextStyle(color: textPrimary, fontSize: 16, fontWeight: FontWeight.bold, fontFamily: 'monospace'))), 
+                      
+                      Tooltip(
+                        message: 'Copiar Valor',
+                        child: IconButton(
+                          icon: Icon(Icons.copy_rounded, color: textSecondary, size: 18),
+                          onPressed: () {
+                            Clipboard.setData(ClipboardData(text: displayValue));
+                            ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(content: const Text('Valor copiado!', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)), backgroundColor: accentYellow, duration: const Duration(seconds: 2)));
+                          }
+                        )
+                      ),
+                      const SizedBox(width: 8),
+
+                      ElevatedButton.icon(
+                        icon: Icon(Icons.psychology_rounded, size: 16, color: bgBlack),
+                        label: Text('Analisar na IA', style: TextStyle(color: bgBlack, fontWeight: FontWeight.bold, fontSize: 12)),
+                        style: ElevatedButton.styleFrom(backgroundColor: accentYellow, padding: const EdgeInsets.symmetric(horizontal: 16)),
+                        onPressed: () {
+                          Navigator.pop(ctx);
+                          setState(() {
+                            _isSandinAIOpen = true;
+                            _chatInputController.text = "Analise o conteúdo desta variável ($key):\n\n```json\n$displayValue\n```";
+                          });
+                        }
+                      ),
+                      const SizedBox(width: 16),
+                      Container(width: 1, height: 20, color: Colors.white.withOpacity(0.1)),
+                      const SizedBox(width: 16),
+                      
+                      InkWell(
+                        onTap: () => Navigator.pop(ctx),
+                        child: Icon(Icons.close, color: textSecondary, size: 24),
+                      )
+                    ]
+                  ),
+                ),
+                
+                Flexible(
+                  child: Container(
+                    color: bgBlack,
+                    padding: const EdgeInsets.all(20),
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1E1E1E),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.white.withOpacity(0.05))
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                            decoration: BoxDecoration(color: Colors.black26, border: Border(bottom: BorderSide(color: Colors.white.withOpacity(0.05)))),
+                            child: Text('JSON Viewer', style: TextStyle(color: textSecondary, fontSize: 10, fontWeight: FontWeight.bold)),
+                          ),
+                          Expanded(
+                            child: _buildJsonViewer(displayValue), // 🚀 Usa o leitor de JSON!
+                          ),
+                        ],
+                      ),
+                    ),
+                  )
+                ),
+              ],
+            ),
+          ),
+        );
+      }
+    );
+  }
+
+  Widget _buildLoadingState() => Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [CircularProgressIndicator(color: accentYellow), const SizedBox(height: 16), Text('Aguardando sincronização com o App...', style: TextStyle(color: textSecondary))]));
+  Widget _buildEmptyState() => Center(child: Text('Nenhuma variável encontrada no escopo atual.', style: TextStyle(color: textSecondary)));
+
+  // ==========================================
+  // ABA 2: WIDGET TREE
+  // ==========================================
+  Widget _buildWidgetTreeTab() {
+    if (_pagesTree.isEmpty && _componentsTree.isEmpty) return _buildLoadingState();
+    
+    final activeRouteName = _activePage.replaceAll('Model', '').replaceAll('Widget', '');
+    final displayRoute = _selectedRoute ?? (activeRouteName.isNotEmpty ? activeRouteName : (_pagesTree.isNotEmpty ? _pagesTree.first['route'] : ''));
+    
+    Map<String, dynamic>? selectedPageData;
+    try { selectedPageData = _pagesTree.firstWhere((p) => p['route'] == displayRoute); } 
+    catch (_) {
+      try { selectedPageData = _componentsTree.firstWhere((p) => p['route'] == displayRoute); } 
+      catch (_) { selectedPageData = _pagesTree.isNotEmpty ? _pagesTree.first : null; }
+    }
+    
+    final treeNodes = selectedPageData?['tree'] as List<dynamic>? ?? [];
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            flex: 3,
+            child: Container(
+              decoration: BoxDecoration(color: panelGray, borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.white.withOpacity(0.05))),
+              clipBehavior: Clip.antiAlias,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                    color: Colors.black.withOpacity(0.2),
+                    child: Row(
+                      children: [
+                        Icon(Icons.route_rounded, color: accentYellow, size: 18),
+                        const SizedBox(width: 8),
+                        Text('Estrutura do App', style: TextStyle(color: textPrimary, fontWeight: FontWeight.bold, fontSize: 13)),
+                      ],
+                    ),
+                  ),
+                  Expanded(
+                    child: ListView(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      children: [
+                        if (_pagesTree.isNotEmpty) _buildRouteGroup('Páginas', _pagesTree, activeRouteName, displayRoute, Icons.web_asset_rounded),
+                        if (_componentsTree.isNotEmpty) _buildRouteGroup('Componentes', _componentsTree, activeRouteName, displayRoute, Icons.extension_rounded),
+                      ],
+                    ),
+                  )
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(width: 16),
+          Expanded(
+            flex: 5,
+            child: Container(
+              decoration: BoxDecoration(color: panelGray, borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.white.withOpacity(0.05))),
+              clipBehavior: Clip.antiAlias,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                    color: Colors.black.withOpacity(0.2),
+                    child: Row(
+                      children: [
+                        Icon(Icons.account_tree_rounded, color: accentYellow, size: 18),
+                        const SizedBox(width: 8),
+                        Text('Widget Tree real: ', style: TextStyle(color: textSecondary, fontSize: 13)),
+                        Text(displayRoute, style: TextStyle(color: textPrimary, fontWeight: FontWeight.bold, fontSize: 13, fontFamily: 'monospace')),
+                      ],
+                    ),
+                  ),
+                  Expanded(
+                    child: Container(
+                      color: bgBlack.withOpacity(0.3),
+                      child: treeNodes.isEmpty 
+                      ? Center(child: Text('Nenhuma árvore de widgets detectada.', style: TextStyle(color: textSecondary)))
+                      : SingleChildScrollView(
+                          scrollDirection: Axis.vertical,
+                          child: SingleChildScrollView(
+                            scrollDirection: Axis.horizontal,
+                            padding: const EdgeInsets.all(24),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: treeNodes.map((node) => _buildTreeNode(node['name'], node['depth'])).toList(),
+                            ),
+                          ),
+                        ),
+                    ),
+                  )
+                ],
+              ),
+            ),
+          )
+        ],
+      ),
+    );
+  }
+
   Widget _buildRouteGroup(String title, List<dynamic> items, String activeRouteName, String displayRoute, IconData folderIcon) {
     return Theme(
       data: ThemeData(dividerColor: Colors.transparent),
@@ -377,11 +885,7 @@ Widget _buildCurrentTabContent() {
                   Icon(folderIcon, size: 14, color: isSelected ? accentYellow : textSecondary),
                   const SizedBox(width: 12),
                   Expanded(
-                    child: Text(page['route'], style: TextStyle(
-                      color: isSelected ? textPrimary : textSecondary,
-                      fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                      fontSize: 13
-                    )),
+                    child: Text(page['route'], style: TextStyle(color: isSelected ? textPrimary : textSecondary, fontWeight: isSelected ? FontWeight.bold : FontWeight.normal, fontSize: 13)),
                   ),
                   if (isLiveActive)
                     Container(
@@ -398,7 +902,6 @@ Widget _buildCurrentTabContent() {
     );
   }
 
-  // 🚀 AQUI ESTÁ A CORREÇÃO DO ERRO DE RENDER FLEX!
   Widget _buildTreeNode(String name, int depth) {
     IconData icon = Icons.widgets_outlined;
     if (name.contains('Container')) icon = Icons.check_box_outline_blank;
@@ -413,12 +916,10 @@ Widget _buildCurrentTabContent() {
     return Padding(
       padding: EdgeInsets.only(left: depth * 16.0, top: 4, bottom: 4), 
       child: Row(
-        // CORREÇÃO: mainAxisSize.min permite que a Row cresça para a direita no scroll horizontal sem quebrar
         mainAxisSize: MainAxisSize.min, 
         children: [
           Icon(icon, size: 14, color: textSecondary.withOpacity(0.7)),
           const SizedBox(width: 8),
-          // CORREÇÃO: Tiramos o Expanded para que o texto possa empurrar o limite da tela para o scroll!
           Text(name, style: TextStyle(color: textPrimary, fontFamily: 'monospace', fontSize: 13)),
         ],
       ),
@@ -426,7 +927,7 @@ Widget _buildCurrentTabContent() {
   }
 
   // ==========================================
-  // ABA 3: CUSTOM CODE EXPLORER COM IA
+  // ABA 3: CUSTOM CODE
   // ==========================================
   Widget _buildCustomCodeTab() {
     if (_isLoadingCode) return Center(child: CircularProgressIndicator(color: accentYellow));
@@ -589,54 +1090,375 @@ Widget _buildCurrentTabContent() {
   }
 
   // ==========================================
-  // ABA 1: STATE INSPECTOR (Variáveis)
+  // ABA 4: CONSOLE TELA CHEIA
   // ==========================================
-  Widget _buildVariableInspectorTab() {
-    return StreamBuilder<Map<String, dynamic>>(
-      stream: context.watch<SocketService>().stateStream,
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting && !snapshot.hasData) return _buildLoadingState();
-        if (!snapshot.hasData) return _buildEmptyState();
-        final data = snapshot.data!;
-        if (_selectedCategory != null && _selectedKey != null) {
-          final catData = data[_selectedCategory];
-          if (catData != null && catData is Map && catData.containsKey(_selectedKey)) _selectedValue = catData[_selectedKey];
-        }
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                flex: 3,
-                child: Container(
-                  decoration: BoxDecoration(color: panelGray, borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.white.withOpacity(0.05)), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.5), blurRadius: 10, offset: const Offset(0, 4))]),
-                  clipBehavior: Clip.antiAlias,
-                  child: ListView(
-                    padding: const EdgeInsets.symmetric(vertical: 12),
+  Widget _buildConsoleTab() {
+    final displayLogs = _consoleLogs.where((log) => !_isSystemLog(log)).toList();
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+      child: Container(
+        decoration: BoxDecoration(color: const Color(0xFF1E1E1E), borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.white.withOpacity(0.1))),
+        clipBehavior: Clip.antiAlias,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+              color: panelGray,
+              child: Row(
+                children: [
+                  Icon(Icons.terminal_rounded, color: const Color(0xFF4AF626), size: 18),
+                  const SizedBox(width: 8),
+                  Text('Console do App', style: TextStyle(color: textPrimary, fontWeight: FontWeight.bold, fontSize: 13)),
+                  const Spacer(),
+                  IconButton(
+                    icon: Icon(Icons.copy_all_rounded, color: textSecondary, size: 18), 
+                    tooltip: 'Copiar Console',
+                    onPressed: () {
+                      Clipboard.setData(ClipboardData(text: displayLogs.join('\n')));
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Console copiado!', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)), backgroundColor: accentYellow));
+                    }
+                  ),
+                  IconButton(icon: Icon(Icons.delete_sweep_rounded, color: textSecondary, size: 18), tooltip: 'Limpar', onPressed: () => setState(() => _consoleLogs.clear()))
+                ],
+              ),
+            ),
+            Expanded(
+              child: displayLogs.isEmpty 
+              ? Center(child: Text('Aguardando logs do Flutter...', style: TextStyle(color: textSecondary.withOpacity(0.5), fontFamily: 'monospace')))
+              : ListView.builder(
+                controller: _consoleScroll,
+                padding: EdgeInsets.zero,
+                itemCount: displayLogs.length,
+                itemBuilder: (context, index) {
+                  final log = displayLogs[index];
+                  final isError = log.toLowerCase().contains('error') || log.contains('EXCEPTION') || log.contains('Failed to');
+                  final isWarning = log.toLowerCase().contains('warning');
+                  
+                  Color textColor = const Color(0xFFCCCCCC);
+                  Color bgColor = index % 2 == 0 ? Colors.transparent : Colors.white.withOpacity(0.02);
+                  
+                  if (isError) {
+                    textColor = const Color(0xFFFF8080);
+                    bgColor = Colors.redAccent.withOpacity(0.05);
+                  } else if (isWarning) {
+                    textColor = const Color(0xFFFFD600);
+                    bgColor = Colors.amber.withOpacity(0.05);
+                  }
+
+                  return GestureDetector(
+                    onSecondaryTapDown: (details) => _showLogContextMenu(context, details.globalPosition, log),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                      decoration: BoxDecoration(color: bgColor, border: Border(bottom: BorderSide(color: Colors.white.withOpacity(0.05)))),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (isError) const Padding(padding: EdgeInsets.only(right: 8, top: 2), child: Icon(Icons.cancel, color: Color(0xFFFF8080), size: 12)),
+                          if (isWarning) const Padding(padding: EdgeInsets.only(right: 8, top: 2), child: Icon(Icons.warning, color: Color(0xFFFFD600), size: 12)),
+                          Expanded(child: SelectableText(log, style: TextStyle(color: textColor, fontFamily: 'monospace', fontSize: 12, height: 1.4))),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            )
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ==========================================
+  // ABA 5: NETWORK INSPECTOR (Com Grupo e Botões)
+  // ==========================================
+  Widget _buildNetworkTab() {
+    // 🚀 AGRUPAMENTO POR PÁGINA
+    final Map<String, List<Map<String, dynamic>>> groupedCalls = {};
+    for (var call in _networkCalls) {
+      final page = call['page'] ?? 'Inicialização do App';
+      groupedCalls.putIfAbsent(page, () => []).add(call);
+    }
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            flex: 4,
+            child: Container(
+              decoration: BoxDecoration(color: panelGray, borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.white.withOpacity(0.05))),
+              clipBehavior: Clip.antiAlias,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                    color: Colors.black.withOpacity(0.2),
+                    child: Row(
+                      children: [
+                        Icon(Icons.swap_vert_rounded, color: accentYellow, size: 18),
+                        const SizedBox(width: 8),
+                        Text('Network Log', style: TextStyle(color: textPrimary, fontWeight: FontWeight.bold, fontSize: 13)),
+                        const Spacer(),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(color: Colors.white.withOpacity(0.1), borderRadius: BorderRadius.circular(10)),
+                          child: Text('${_networkCalls.length} requests', style: TextStyle(color: textSecondary, fontSize: 10, fontWeight: FontWeight.bold)),
+                        )
+                      ],
+                    ),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    decoration: BoxDecoration(color: Colors.white.withOpacity(0.02), border: Border(bottom: BorderSide(color: Colors.white.withOpacity(0.05)))),
+                    child: Row(
+                      children: [
+                        SizedBox(width: 40, child: Text('Status', style: TextStyle(color: textSecondary, fontSize: 11, fontWeight: FontWeight.bold))),
+                        Expanded(child: Text('Endpoint (API Call)', style: TextStyle(color: textSecondary, fontSize: 11, fontWeight: FontWeight.bold))),
+                        SizedBox(width: 60, child: Text('Time', style: TextStyle(color: textSecondary, fontSize: 11, fontWeight: FontWeight.bold))),
+                      ],
+                    ),
+                  ),
+                  Expanded(
+                    child: _networkCalls.isEmpty 
+                    ? Center(child: Text('Aguardando chamadas de API...', style: TextStyle(color: textSecondary.withOpacity(0.5))))
+                    : ListView.builder(
+                      padding: EdgeInsets.zero,
+                      itemCount: groupedCalls.length,
+                      itemBuilder: (context, index) {
+                        final pageName = groupedCalls.keys.elementAt(index);
+                        final calls = groupedCalls[pageName]!;
+
+                        // 🚀 COLLAPSADOR DE PÁGINAS
+                        return Theme(
+                          data: ThemeData(dividerColor: Colors.transparent),
+                          child: ExpansionTile(
+                            initiallyExpanded: true,
+                            iconColor: accentYellow,
+                            collapsedIconColor: textSecondary,
+                            tilePadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 0),
+                            title: Text('📍 $pageName', style: TextStyle(color: accentYellow, fontWeight: FontWeight.bold, fontSize: 11, letterSpacing: 0.5)),
+                            children: calls.map((call) {
+                              final status = call['status'] ?? 0;
+                              final type = call['type'] ?? 'api';
+                              final isError = status >= 400 || status == 0;
+                              final isSelected = _selectedNetworkCall == call;
+                              final displayEndpoint = call['endpoint'] ?? 'Database Call';
+                              
+                              Color textColor = textSecondary;
+                              if (type == 'database') textColor = const Color(0xFF00E5FF); 
+                              else if (isError) textColor = Colors.redAccent;
+
+                              // 🚀 HORÁRIO FORMATADO
+                              final ts = call['ts'] as int?;
+                              String timeStr = '--:--:--';
+                              if (ts != null) {
+                                final dt = DateTime.fromMillisecondsSinceEpoch(ts);
+                                timeStr = '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}:${dt.second.toString().padLeft(2, '0')}';
+                              }
+
+                              return InkWell(
+                                onTap: () => setState(() => _selectedNetworkCall = call),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                                  decoration: BoxDecoration(
+                                    color: isSelected ? accentYellow.withOpacity(0.05) : Colors.transparent,
+                                    border: Border(left: BorderSide(color: isSelected ? accentYellow : Colors.transparent, width: 3), bottom: BorderSide(color: Colors.white.withOpacity(0.02)))
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      SizedBox(width: 40, child: Text('$status', style: TextStyle(color: isError ? Colors.redAccent : Colors.greenAccent, fontSize: 12, fontWeight: FontWeight.bold, fontFamily: 'monospace'))),
+                                      Expanded(child: Text(displayEndpoint, style: TextStyle(color: isSelected ? textPrimary : textColor, fontSize: 13, fontWeight: isSelected ? FontWeight.bold : FontWeight.normal), overflow: TextOverflow.ellipsis)),
+                                      SizedBox(width: 60, child: Text(timeStr, style: TextStyle(color: textSecondary.withOpacity(0.5), fontSize: 10, fontFamily: 'monospace'))),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            }).toList(),
+                          ),
+                        );
+                      },
+                    ),
+                  )
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(width: 16),
+          Expanded(
+            flex: 6,
+            child: Container(
+              decoration: BoxDecoration(color: panelGray, borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.white.withOpacity(0.05))),
+              clipBehavior: Clip.antiAlias,
+              child: _selectedNetworkCall == null 
+              ? Center(child: Text('Selecione uma requisição para ver os detalhes', style: TextStyle(color: textSecondary)))
+              : DefaultTabController(
+                  length: 2,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      _buildCategoryList('APPLICATION STATE', data['APPLICATION STATE']),
-                      _buildCategoryList('AUTHENTICATION', data['AUTHENTICATION']),
-                      _buildCategoryList('WIDGET STATE', data['WIDGET STATE']),
-                      _buildCategoryList('PAGE STATE', data['PAGE STATE']),
-                      _buildCategoryList('ACTION OUTPUTS', data['ACTION OUTPUTS']),
+                      Container(
+                        color: Colors.black.withOpacity(0.2),
+                        child: TabBar(
+                          indicatorColor: accentYellow,
+                          labelColor: accentYellow,
+                          unselectedLabelColor: textSecondary,
+                          tabs: const [Tab(text: 'Response Body'), Tab(text: 'Headers')],
+                        ),
+                      ),
+                      Expanded(
+                        child: TabBarView(
+                          children: [
+                            _buildNetworkDataView('Response Body', _formatJson(_selectedNetworkCall!['response'])),
+                            _buildNetworkDataView('Headers', _formatJson(_selectedNetworkCall!['headers'])),
+                          ],
+                        ),
+                      )
                     ],
                   ),
                 ),
+            ),
+          )
+        ],
+      ),
+    );
+  }
+
+  // 🚀 O VISUALIZADOR DA DIREITA NO NETWORK COM BOTÕES
+  Widget _buildNetworkDataView(String title, String data) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          color: Colors.black.withOpacity(0.2),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              ElevatedButton.icon(
+                icon: Icon(Icons.copy_rounded, size: 14, color: textPrimary),
+                label: Text('Copiar', style: TextStyle(color: textPrimary, fontSize: 12)),
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.white.withOpacity(0.1), minimumSize: const Size(0, 32)),
+                onPressed: () {
+                  Clipboard.setData(ClipboardData(text: data));
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$title copiado!', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)), backgroundColor: accentYellow, duration: const Duration(seconds: 2)));
+                },
               ),
-              const SizedBox(width: 16),
-              Expanded(
-                flex: 5,
-                child: Container(
-                  decoration: BoxDecoration(color: panelGray, borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.white.withOpacity(0.05)), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.5), blurRadius: 10, offset: const Offset(0, 4))]),
-                  clipBehavior: Clip.antiAlias,
-                  child: _buildRightPanel(),
-                ),
-              )
+              const SizedBox(width: 8),
+              ElevatedButton.icon(
+                icon: Icon(Icons.psychology_rounded, size: 14, color: bgBlack),
+                label: Text('Analisar com IA', style: TextStyle(color: bgBlack, fontWeight: FontWeight.bold, fontSize: 12)),
+                style: ElevatedButton.styleFrom(backgroundColor: accentYellow, minimumSize: const Size(0, 32)),
+                onPressed: () {
+                  setState(() {
+                    _isSandinAIOpen = true;
+                    _chatInputController.text = "Analise este $title de rede:\n\n```json\n$data\n```";
+                  });
+                },
+              ),
             ],
           ),
-        );
-      },
+        ),
+        Expanded(
+          child: _buildJsonViewer(data) // 🚀 Aplica o mesmo leitor listrado com linhas aqui!
+        ),
+      ],
+    );
+  }
+
+  // ==========================================
+  // 🚀 O NOVO PAINEL DESLIZANTE DO SANDIN AI
+  // ==========================================
+  Widget _buildSandinAIPanel() {
+    return Container(
+      width: 450,
+      decoration: BoxDecoration(
+        color: panelGray,
+        boxShadow: const [BoxShadow(color: Colors.black87, blurRadius: 20, offset: Offset(-5, 0))],
+        border: Border(left: BorderSide(color: accentYellow.withOpacity(0.3), width: 1))
+      ),
+      child: Column(
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+            decoration: BoxDecoration(color: accentYellow.withOpacity(0.05), border: Border(bottom: BorderSide(color: accentYellow.withOpacity(0.2)))),
+            child: Row(
+              children: [
+                Icon(Icons.psychology_rounded, color: accentYellow, size: 24),
+                const SizedBox(width: 12),
+                Text('Sandin AI Copilot', style: TextStyle(color: accentYellow, fontWeight: FontWeight.bold, fontSize: 16)),
+                const Spacer(),
+                IconButton(
+                  icon: Icon(Icons.close, color: textSecondary),
+                  onPressed: () => setState(() => _isSandinAIOpen = false),
+                )
+              ],
+            ),
+          ),
+          Expanded(
+            child: ListView.builder(
+              controller: _chatScroll,
+              padding: const EdgeInsets.all(16),
+              itemCount: _chatHistory.length,
+              itemBuilder: (context, index) {
+                final msg = _chatHistory[index];
+                final isUser = msg['role'] == 'user';
+                final isSystem = msg['role'] == 'system';
+                
+                return Align(
+                  alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+                  child: Container(
+                    margin: const EdgeInsets.only(bottom: 16),
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: isUser ? accentYellow.withOpacity(0.1) : (isSystem ? Colors.redAccent.withOpacity(0.1) : Colors.black.withOpacity(0.3)),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: isUser ? accentYellow.withOpacity(0.3) : (isSystem ? Colors.redAccent.withOpacity(0.5) : Colors.white.withOpacity(0.05)))
+                    ),
+                    child: SelectableText(
+                      msg['text'],
+                      style: TextStyle(color: isSystem ? Colors.redAccent : textPrimary, fontSize: 13, height: 1.5, fontFamily: isSystem ? 'monospace' : null),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+          if (_isSandinThinking)
+            Padding(padding: const EdgeInsets.all(8.0), child: CircularProgressIndicator(color: accentYellow, strokeWidth: 2)),
+          Container(
+            padding: const EdgeInsets.all(16),
+            color: Colors.black.withOpacity(0.2),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _chatInputController,
+                    style: TextStyle(color: textPrimary, fontSize: 13),
+                    onSubmitted: (_) => _sendManualChatMessage(),
+                    decoration: InputDecoration(
+                      hintText: 'Pergunte sobre código, bugs...',
+                      hintStyle: TextStyle(color: textSecondary),
+                      filled: true, fillColor: bgBlack,
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                IconButton(
+                  icon: Icon(Icons.send_rounded, color: accentYellow),
+                  onPressed: _isSandinThinking ? null : () => _sendManualChatMessage(),
+                )
+              ],
+            ),
+          )
+        ],
+      ),
     );
   }
 
@@ -653,7 +1475,7 @@ Widget _buildCurrentTabContent() {
             decoration: BoxDecoration(color: Colors.white.withOpacity(0.03), borderRadius: BorderRadius.circular(20), border: Border.all(color: Colors.white.withOpacity(0.08)), gradient: LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [Colors.white.withOpacity(0.08), Colors.white.withOpacity(0.01)])),
             child: Row(
               children: [
-                Text(_currentTabIndex == 0 ? 'State Inspector' : _currentTabIndex == 1 ? 'Widget Tree Explorer' : 'Custom Code Explorer', style: TextStyle(color: textPrimary, fontSize: 16, fontWeight: FontWeight.w700, letterSpacing: 0.5)),
+                Text(_currentTabIndex == 0 ? 'State Inspector' : _currentTabIndex == 1 ? 'Widget Tree Explorer' : _currentTabIndex == 2 ? 'Custom Code Explorer' : _currentTabIndex == 3 ? 'Console do App' : 'Network Inspector', style: TextStyle(color: textPrimary, fontSize: 16, fontWeight: FontWeight.w700, letterSpacing: 0.5)),
                 const SizedBox(width: 32),
                 Expanded(
                   child: Container(
@@ -670,515 +1492,5 @@ Widget _buildCurrentTabContent() {
         ),
       ),
     );
-  }
-
-  Widget _buildCategoryList(String title, dynamic data) {
-    if (data == null || (data is Map && data.isEmpty)) return const SizedBox.shrink();
-    final Map<String, dynamic> mapData = (data is Map) ? Map<String, dynamic>.from(data) : {};
-    mapData.removeWhere((key, value) => key.startsWith('_ts_'));
-    if (mapData.isEmpty) return const SizedBox.shrink();
-    return Theme(
-      data: ThemeData(dividerColor: Colors.transparent),
-      child: ExpansionTile(
-        initiallyExpanded: true, iconColor: accentYellow, collapsedIconColor: textSecondary, tilePadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 0), leading: Icon(Icons.folder_copy_rounded, color: accentYellow.withOpacity(0.8), size: 18),
-        title: Row(children: [Expanded(child: Text(title, style: TextStyle(color: textPrimary, fontWeight: FontWeight.bold, fontSize: 12, letterSpacing: 0.5), overflow: TextOverflow.ellipsis)), const SizedBox(width: 8), Container(padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2), decoration: BoxDecoration(color: Colors.white.withOpacity(0.1), borderRadius: BorderRadius.circular(10)), child: Text('${mapData.length}', style: TextStyle(color: textSecondary, fontSize: 10, fontWeight: FontWeight.bold)))]),
-        children: mapData.entries.map((e) => _buildListItem(title, e.key, e.value)).toList(),
-      ),
-    );
-  }
-
-  Widget _buildListItem(String category, String key, dynamic value) {
-    final isSelected = _selectedKey == key && _selectedCategory == category;
-    return InkWell(
-      onTap: () => setState(() { _selectedKey = key; _selectedValue = value; _selectedCategory = category; }),
-      hoverColor: Colors.white.withOpacity(0.02),
-      child: Container(
-        decoration: BoxDecoration(color: isSelected ? accentYellow.withOpacity(0.05) : Colors.transparent, border: Border(left: BorderSide(color: isSelected ? accentYellow : Colors.transparent, width: 3))),
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-        child: Row(children: [const SizedBox(width: 14), _getTypeBadge(value), const SizedBox(width: 12), Expanded(child: Text(key, style: TextStyle(color: isSelected ? accentYellow : textSecondary, fontSize: 13, fontFamily: 'monospace', fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal), maxLines: 1, overflow: TextOverflow.ellipsis)), if (isSelected) Icon(Icons.chevron_right_rounded, size: 16, color: accentYellow.withOpacity(0.5))]),
-      ),
-    );
-  }
-
-  Widget _getTypeBadge(dynamic value) {
-    String typeStr = 'null'; Color badgeColor = Colors.grey[700]!;
-    if (value != null) {
-      if (value is String) { typeStr = 'str'; badgeColor = const Color(0xFF4EC9B0); } 
-      else if (value is bool) { typeStr = 'bool'; badgeColor = const Color(0xFFC586C0); } 
-      else if (value is int || value is double || num.tryParse(value.toString()) != null) { typeStr = 'num'; badgeColor = const Color(0xFFB5CEA8); } 
-      else if (value is List) { typeStr = 'list'; badgeColor = const Color(0xFF4CA1FE); } 
-      else if (value is Map) { typeStr = 'map'; badgeColor = accentYellow; } 
-      else { typeStr = 'obj'; badgeColor = Colors.orangeAccent; }
-    }
-    return Container(width: 40, padding: const EdgeInsets.symmetric(vertical: 3), decoration: BoxDecoration(color: badgeColor.withOpacity(0.15), borderRadius: BorderRadius.circular(6), border: Border.all(color: badgeColor.withOpacity(0.3))), alignment: Alignment.center, child: Text(typeStr, style: TextStyle(color: badgeColor, fontSize: 10, fontWeight: FontWeight.w700, fontFamily: 'monospace')));
-  }
-
-  Widget _buildRightPanel() {
-    if (_selectedKey == null) return Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [Icon(Icons.data_exploration_rounded, size: 48, color: Colors.white.withOpacity(0.05)), const SizedBox(height: 16), Text('Selecione uma variável para inspecionar', style: TextStyle(color: textSecondary))]));
-    String displayValue = '';
-    if (_selectedValue is Map || _selectedValue is List) displayValue = const JsonEncoder.withIndent('  ').convert(_selectedValue); else displayValue = _selectedValue.toString();
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16), decoration: BoxDecoration(color: Colors.black.withOpacity(0.2), border: Border(bottom: BorderSide(color: Colors.white.withOpacity(0.05)))),
-          child: Row(children: [_getTypeBadge(_selectedValue), const SizedBox(width: 12), Expanded(child: Text(_selectedKey!, style: TextStyle(color: textPrimary, fontSize: 15, fontWeight: FontWeight.bold, fontFamily: 'monospace'))), Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4), decoration: BoxDecoration(color: accentYellow.withOpacity(0.1), borderRadius: BorderRadius.circular(12)), child: Text(_selectedCategory!, style: TextStyle(color: accentYellow, fontSize: 10, fontWeight: FontWeight.bold)))]),
-        ),
-        Expanded(child: Container(color: bgBlack.withOpacity(0.5), child: SingleChildScrollView(padding: const EdgeInsets.all(20), child: SelectableText(displayValue, style: const TextStyle(color: Color(0xFFCE9178), fontSize: 13, fontFamily: 'monospace', height: 1.6, letterSpacing: 0.3))))),
-      ],
-    );
-  }
-
-  Widget _buildLoadingState() => Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [CircularProgressIndicator(color: accentYellow), const SizedBox(height: 16), Text('Aguardando sincronização com o App...', style: TextStyle(color: textSecondary))]));
-  Widget _buildEmptyState() => Center(child: Text('Nenhuma variável encontrada no escopo atual.', style: TextStyle(color: textSecondary)));
-
-// ==========================================
-  // 🚀 ABA 4: CONSOLE (Chrome Style) & SANDIN AI
-  // ==========================================
-  
-  // Função que filtra os logs do nosso próprio sistema para não sujar o terminal do usuário
-  bool _isSystemLog(String log) {
-    final l = log.toLowerCase();
-    return l.contains('[loginjector]') || 
-           l.contains('protocol buffers') || 
-           l.contains('vm info:') || 
-           l.contains('attached to isolate') || 
-           l.contains('connected to dart vm') ||
-           l.contains('debug service listening') ||
-           l.contains('this app is linked to');
-  }
-
-  // Envia a mensagem pro Sandin (agora aceita um contexto oculto, como a linha do log)
-  Future<void> _sendManualChatMessage({String? prefixContext}) async {
-    final text = _chatInputController.text.trim();
-    if (text.isEmpty && prefixContext == null) return;
-    
-    final displayMessage = text.isNotEmpty ? text : 'Analise este log do console.';
-    final promptToSend = prefixContext != null ? "$prefixContext\n\n$text" : text;
-    
-    _chatInputController.clear();
-    setState(() { 
-      _chatHistory.add({'role': 'user', 'text': displayMessage}); 
-      _isSandinThinking = true; 
-    });
-    
-    WidgetsBinding.instance.addPostFrameCallback((_) { if (_chatScroll.hasClients) _chatScroll.jumpTo(_chatScroll.position.maxScrollExtent); });
-    
-    try {
-      final res = await http.post(
-        Uri.parse('http://localhost:3000/api/chat'), 
-        headers: {'Content-Type': 'application/json'}, 
-        body: jsonEncode({'message': promptToSend})
-      );
-      setState(() { 
-        _chatHistory.add({'role': 'ai', 'text': jsonDecode(res.body)['analysis']}); 
-        _isSandinThinking = false; 
-      });
-      WidgetsBinding.instance.addPostFrameCallback((_) { if (_chatScroll.hasClients) _chatScroll.jumpTo(_chatScroll.position.maxScrollExtent); });
-    } catch (e) {
-      setState(() { _isSandinThinking = false; });
-    }
-  }
-
-  // Abre o Menu de Botão Direito (Context Menu)
-  void _showLogContextMenu(BuildContext context, Offset position, String logLine) {
-    showMenu(
-      context: context,
-      position: RelativeRect.fromLTRB(position.dx, position.dy, position.dx, position.dy),
-      color: panelGray,
-      elevation: 8,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8), side: BorderSide(color: Colors.white.withOpacity(0.1))),
-      items: [
-        PopupMenuItem(
-          value: 'copy',
-          child: Row(children: [Icon(Icons.copy, size: 16, color: textPrimary), const SizedBox(width: 8), Text('Copiar Linha', style: TextStyle(color: textPrimary, fontSize: 13))]),
-        ),
-        PopupMenuItem(
-          value: 'ask',
-          child: Row(children: [Icon(Icons.psychology, size: 16, color: accentYellow), const SizedBox(width: 8), Text('Perguntar ao Sandin', style: TextStyle(color: accentYellow, fontSize: 13, fontWeight: FontWeight.bold))]),
-        ),
-      ],
-    ).then((value) {
-      if (value == 'copy') {
-        Clipboard.setData(ClipboardData(text: logLine));
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Linha copiada!', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)), backgroundColor: accentYellow, duration: const Duration(seconds: 2)));
-      } else if (value == 'ask') {
-        _sendManualChatMessage(prefixContext: "Por favor, explique e me ajude a resolver este log que apareceu no meu console do Flutter:\n\n```text\n$logLine\n```");
-      }
-    });
-  }
-
-  Widget _buildConsoleAndAITab() {
-    // Filtra os logs para exibir apenas o que interessa
-    final displayLogs = _consoleLogs.where((log) => !_isSystemLog(log)).toList();
-
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // PAINEL ESQUERDO: TERMINAL (CHROME DEVTOOLS STYLE)
-          Expanded(
-            flex: 5,
-            child: Container(
-              decoration: BoxDecoration(color: const Color(0xFF1E1E1E), borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.white.withOpacity(0.1))),
-              clipBehavior: Clip.antiAlias,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                    color: panelGray,
-                    child: Row(
-                      children: [
-                        Icon(Icons.terminal_rounded, color: const Color(0xFF4AF626), size: 18),
-                        const SizedBox(width: 8),
-                        Text('Console do Projeto', style: TextStyle(color: textPrimary, fontWeight: FontWeight.bold, fontSize: 13)),
-                        const Spacer(),
-                        // NOVO: Botão Copiar Todo o Console
-                        IconButton(
-                          icon: Icon(Icons.copy_all_rounded, color: textSecondary, size: 18), 
-                          tooltip: 'Copiar Console Inteiro',
-                          onPressed: () {
-                            Clipboard.setData(ClipboardData(text: displayLogs.join('\n')));
-                            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Console inteiro copiado!', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)), backgroundColor: accentYellow));
-                          }
-                        ),
-                        // Botão Limpar
-                        IconButton(icon: Icon(Icons.delete_sweep_rounded, color: textSecondary, size: 18), tooltip: 'Limpar', onPressed: () => setState(() => _consoleLogs.clear()))
-                      ],
-                    ),
-                  ),
-                  Expanded(
-                    child: displayLogs.isEmpty 
-                    ? Center(child: Text('Aguardando logs do Flutter...', style: TextStyle(color: textSecondary.withOpacity(0.5), fontFamily: 'monospace')))
-                    : ListView.builder(
-                      controller: _consoleScroll,
-                      padding: EdgeInsets.zero,
-                      itemCount: displayLogs.length,
-                      itemBuilder: (context, index) {
-                        final log = displayLogs[index];
-                        final isError = log.toLowerCase().contains('error') || log.contains('EXCEPTION') || log.contains('Failed to');
-                        final isWarning = log.toLowerCase().contains('warning');
-                        
-                        Color textColor = const Color(0xFFCCCCCC);
-                        Color bgColor = index % 2 == 0 ? Colors.transparent : Colors.white.withOpacity(0.02);
-                        
-                        if (isError) {
-                          textColor = const Color(0xFFFF8080);
-                          bgColor = Colors.redAccent.withOpacity(0.05);
-                        } else if (isWarning) {
-                          textColor = const Color(0xFFFFD600);
-                          bgColor = Colors.amber.withOpacity(0.05);
-                        }
-
-                        return GestureDetector(
-                          // Captura o clique com o BOTÃO DIREITO do mouse
-                          onSecondaryTapDown: (details) => _showLogContextMenu(context, details.globalPosition, log),
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-                            decoration: BoxDecoration(
-                              color: bgColor,
-                              border: Border(bottom: BorderSide(color: Colors.white.withOpacity(0.05))),
-                            ),
-                            child: Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                if (isError) const Padding(padding: EdgeInsets.only(right: 8, top: 2), child: Icon(Icons.cancel, color: Color(0xFFFF8080), size: 12)),
-                                if (isWarning) const Padding(padding: EdgeInsets.only(right: 8, top: 2), child: Icon(Icons.warning, color: Color(0xFFFFD600), size: 12)),
-                                Expanded(
-                                  child: SelectableText(
-                                    log, 
-                                    style: TextStyle(color: textColor, fontFamily: 'monospace', fontSize: 12, height: 1.4)
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        );
-                      },
-                    ),
-                  )
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(width: 16),
-          
-          // PAINEL DIREITO: SANDIN AI CHAT
-          Expanded(
-            flex: 4,
-            child: Container(
-              decoration: BoxDecoration(color: panelGray, borderRadius: BorderRadius.circular(16), border: Border.all(color: accentYellow.withOpacity(0.3))),
-              clipBehavior: Clip.antiAlias,
-              child: Column(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                    decoration: BoxDecoration(color: accentYellow.withOpacity(0.1), border: Border(bottom: BorderSide(color: accentYellow.withOpacity(0.2)))),
-                    child: Row(
-                      children: [
-                        Icon(Icons.psychology_rounded, color: accentYellow, size: 20),
-                        const SizedBox(width: 8),
-                        Text('Sandin AI Copilot', style: TextStyle(color: accentYellow, fontWeight: FontWeight.bold, fontSize: 14)),
-                        const Spacer(),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                          decoration: BoxDecoration(color: Colors.green.withOpacity(0.2), borderRadius: BorderRadius.circular(8)),
-                          child: const Text('MONITORANDO ERROS', style: TextStyle(color: Colors.green, fontSize: 9, fontWeight: FontWeight.bold)),
-                        )
-                      ],
-                    ),
-                  ),
-                  Expanded(
-                    child: ListView.builder(
-                      controller: _chatScroll,
-                      padding: const EdgeInsets.all(16),
-                      itemCount: _chatHistory.length,
-                      itemBuilder: (context, index) {
-                        final msg = _chatHistory[index];
-                        final isUser = msg['role'] == 'user';
-                        final isSystem = msg['role'] == 'system';
-                        
-                        return Align(
-                          alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-                          child: Container(
-                            margin: const EdgeInsets.only(bottom: 16),
-                            padding: const EdgeInsets.all(16),
-                            decoration: BoxDecoration(
-                              color: isUser ? accentYellow.withOpacity(0.1) : (isSystem ? Colors.redAccent.withOpacity(0.1) : Colors.black.withOpacity(0.3)),
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(color: isUser ? accentYellow.withOpacity(0.3) : (isSystem ? Colors.redAccent.withOpacity(0.5) : Colors.white.withOpacity(0.05)))
-                            ),
-                            child: SelectableText(
-                              msg['text'],
-                              style: TextStyle(color: isSystem ? Colors.redAccent : textPrimary, fontSize: 13, height: 1.5, fontFamily: isSystem ? 'monospace' : null),
-                            ),
-                          ),
-                        );
-                      },
-                    ),
-                  ),
-                  if (_isSandinThinking)
-                    Padding(padding: const EdgeInsets.all(8.0), child: CircularProgressIndicator(color: accentYellow, strokeWidth: 2)),
-                  Container(
-                    padding: const EdgeInsets.all(16),
-                    color: Colors.black.withOpacity(0.2),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: TextField(
-                            controller: _chatInputController,
-                            style: TextStyle(color: textPrimary, fontSize: 13),
-                            onSubmitted: (_) => _sendManualChatMessage(),
-                            decoration: InputDecoration(
-                              hintText: 'Pergunte ao Sandin...',
-                              hintStyle: TextStyle(color: textSecondary),
-                              filled: true, fillColor: bgBlack,
-                              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
-                              contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        IconButton(
-                          icon: Icon(Icons.send_rounded, color: accentYellow),
-                          onPressed: _isSandinThinking ? null : () => _sendManualChatMessage(),
-                        )
-                      ],
-                    ),
-                  )
-                ],
-              ),
-            ),
-          )
-        ],
-      ),
-    );
-  }
-
-  // ==========================================
-  // 🚀 ABA 5: NETWORK INSPECTOR (Chrome Style)
-  // ==========================================
-  Widget _buildNetworkTab() {
-    return StreamBuilder<List<Map<String, dynamic>>>(
-      stream: context.watch<SocketService>().networkStream,
-      initialData: context.read<SocketService>().networkHistory,
-      builder: (context, snapshot) {
-        final calls = snapshot.data ?? [];
-
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // PAINEL ESQUERDO: LISTA DE REQUESTS
-              Expanded(
-                flex: 4,
-                child: Container(
-                  decoration: BoxDecoration(color: panelGray, borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.white.withOpacity(0.05))),
-                  clipBehavior: Clip.antiAlias,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                        color: Colors.black.withOpacity(0.2),
-                        child: Row(
-                          children: [
-                            Icon(Icons.swap_vert_rounded, color: accentYellow, size: 18),
-                            const SizedBox(width: 8),
-                            Text('Network Log', style: TextStyle(color: textPrimary, fontWeight: FontWeight.bold, fontSize: 13)),
-                            const Spacer(),
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                              decoration: BoxDecoration(color: Colors.white.withOpacity(0.1), borderRadius: BorderRadius.circular(10)),
-                              child: Text('${calls.length} requests', style: TextStyle(color: textSecondary, fontSize: 10, fontWeight: FontWeight.bold)),
-                            )
-                          ],
-                        ),
-                      ),
-                      // CABEÇALHO DA TABELA
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                        decoration: BoxDecoration(color: Colors.white.withOpacity(0.02), border: Border(bottom: BorderSide(color: Colors.white.withOpacity(0.05)))),
-                        child: Row(
-                          children: [
-                            SizedBox(width: 40, child: Text('Status', style: TextStyle(color: textSecondary, fontSize: 11, fontWeight: FontWeight.bold))),
-                            Expanded(child: Text('Endpoint (API Call)', style: TextStyle(color: textSecondary, fontSize: 11, fontWeight: FontWeight.bold))),
-                            SizedBox(width: 60, child: Text('Time', style: TextStyle(color: textSecondary, fontSize: 11, fontWeight: FontWeight.bold))),
-                          ],
-                        ),
-                      ),
-                      Expanded(
-                        child: calls.isEmpty 
-                        ? Center(child: Text('Aguardando chamadas de API...', style: TextStyle(color: textSecondary.withOpacity(0.5))))
-                        : ListView.builder(
-                          padding: EdgeInsets.zero,
-                          itemCount: calls.length,
-                          itemBuilder: (context, index) {
-                            final call = calls[index];
-                            final status = call['status'] ?? 0;
-                            final type = call['type'] ?? 'api';
-                            
-                            // ✅ As variáveis que o Flutter estava sentindo falta:
-                            final isError = status >= 400 || status == 0;
-                            final isSelected = _selectedNetworkCall == call;
-
-                            // ✅ A lógica de cores (Azul pro Banco, Vermelho pra Erro, Cinza pro resto)
-                            Color textColor = textSecondary;
-                            if (type == 'database') {
-                                textColor = const Color(0xFF00E5FF); 
-                            } else if (isError) {
-                                textColor = Colors.redAccent;
-                            }
-
-                            return InkWell(
-                              onTap: () => setState(() => _selectedNetworkCall = call),
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                                decoration: BoxDecoration(
-                                  color: isSelected ? accentYellow.withOpacity(0.05) : (index % 2 == 0 ? Colors.transparent : Colors.white.withOpacity(0.01)),
-                                  border: Border(left: BorderSide(color: isSelected ? accentYellow : Colors.transparent, width: 3), bottom: BorderSide(color: Colors.white.withOpacity(0.02)))
-                                ),
-                                child: Row(
-                                  children: [
-                                    SizedBox(
-                                      width: 40, 
-                                      child: Text('$status', style: TextStyle(color: isError ? Colors.redAccent : Colors.greenAccent, fontSize: 12, fontWeight: FontWeight.bold, fontFamily: 'monospace'))
-                                    ),
-                                    Expanded(
-                                      // Aplicamos o textColor inteligente aqui!
-                                      child: Text(call['endpoint'] ?? 'Unknown', style: TextStyle(color: isSelected ? textPrimary : textColor, fontSize: 13, fontWeight: isSelected ? FontWeight.bold : FontWeight.normal), overflow: TextOverflow.ellipsis),
-                                    ),
-                                    SizedBox(
-                                      width: 60, 
-                                      child: Text('${call['duration']}ms', style: TextStyle(color: textSecondary, fontSize: 11, fontFamily: 'monospace'))
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            );
-                          },
-                        ),
-                      )
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(width: 16),
-              
-              // PAINEL DIREITO: DETALHES (HEADERS & RESPONSE)
-              Expanded(
-                flex: 6,
-                child: Container(
-                  decoration: BoxDecoration(color: panelGray, borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.white.withOpacity(0.05))),
-                  clipBehavior: Clip.antiAlias,
-                  child: _selectedNetworkCall == null 
-                  ? Center(child: Text('Selecione uma requisição para ver os detalhes', style: TextStyle(color: textSecondary)))
-                  : DefaultTabController(
-                      length: 2,
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          Container(
-                            color: Colors.black.withOpacity(0.2),
-                            child: TabBar(
-                              indicatorColor: accentYellow,
-                              labelColor: accentYellow,
-                              unselectedLabelColor: textSecondary,
-                              tabs: const [Tab(text: 'Response Body'), Tab(text: 'Headers')],
-                            ),
-                          ),
-                          Expanded(
-                            child: TabBarView(
-                              children: [
-                                // TAB 1: RESPONSE BODY (Formatado)
-                                Container(
-                                  color: bgBlack.withOpacity(0.5),
-                                  child: SingleChildScrollView(
-                                    padding: const EdgeInsets.all(20),
-                                    child: SelectableText(
-                                      _formatJson(_selectedNetworkCall!['response']), 
-                                      style: const TextStyle(color: Color(0xFFCE9178), fontSize: 13, fontFamily: 'monospace', height: 1.6)
-                                    ),
-                                  ),
-                                ),
-                                // TAB 2: HEADERS
-                                Container(
-                                  color: bgBlack.withOpacity(0.5),
-                                  child: SingleChildScrollView(
-                                    padding: const EdgeInsets.all(20),
-                                    child: SelectableText(
-                                      _formatJson(_selectedNetworkCall!['headers']), 
-                                      style: const TextStyle(color: Color(0xFF9CDCFE), fontSize: 13, fontFamily: 'monospace', height: 1.6)
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          )
-                        ],
-                      ),
-                    ),
-                ),
-              )
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  // Tenta formatar string para JSON bonito, se falhar, retorna o texto puro
-  String _formatJson(dynamic input) {
-    if (input == null) return 'null';
-    if (input is Map || input is List) return const JsonEncoder.withIndent('  ').convert(input);
-    try {
-      final decoded = jsonDecode(input.toString());
-      return const JsonEncoder.withIndent('  ').convert(decoded);
-    } catch (_) {
-      return input.toString(); // Retorna texto puro (HTML ou erro bizarro)
-    }
   }
 }

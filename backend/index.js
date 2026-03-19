@@ -19,27 +19,42 @@ const logInjector = require('./services/logInjector');
 const sandinAI = require('./services/sandinAI');
 const VmServiceClient = require('./services/vmServiceClient');
 const TelemetryRouter = require('./services/telemetryRouter');
-const panelBuilder = require('./services/panelBuilder');
 const telemetry = require('./services/telemetry');
+
+let localEnvApiKey = '';
+try {
+  const envPath = path.join(__dirname, '.env');
+  if (fs.existsSync(envPath)) {
+    const envData = fs.readFileSync(envPath, 'utf8');
+    const match = envData.match(/SANDIN_API_KEY=(.*)/);
+    if (match) localEnvApiKey = match[1].trim().replace(/['"]/g, '');
+  }
+} catch (e) {}
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*', methods: ['GET', 'POST'] } });
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
 
 let currentProcess = null;
 let sandinApiKey = '';
 let activeProjectPath = null; 
 
 let savedCommands = []; 
-// 🚀 NOVO: Buffer de memória para o Console não ficar vazio
 let logHistory = []; 
+let networkHistory = [];
 
 const lastState = {
-  "APPLICATION STATE": {}, "AUTHENTICATION": {}, "WIDGET STATE": {}, "PAGE STATE": {}, "ACTION OUTPUTS": {}, "active_page": "Unknown"
+  "APPLICATION STATE": {}, "AUTHENTICATION": {}, "WIDGET STATE": {}, "PAGE STATE": {}, "ACTION OUTPUTS": {}, "active_page": "Inicialização do App"
 };
+
+// Prevent UI flicker while still allowing legitimate empty states.
+const EMPTY_GRACE_MS = 800;
+const PAGE_CHANGE_GRACE_MS = 250;
+const lastNonEmptyTs = { widget: 0, page: 0, actions: 0 };
+let lastActivePage = lastState['active_page'];
 
 const CONFIG_PATH = path.join(require('os').homedir(), '.teamsoft-ff-localrun', 'config.json');
 
@@ -73,15 +88,13 @@ loadPersistedConfig();
 
 io.on('connection', (socket) => {
   socket.on('request-initial-state', async () => {
-    // 🚀 NOVO: Envia o histórico de logs assim que a tela abre!
     socket.emit('log-history', logHistory);
+    networkHistory.forEach(n => socket.emit('network-update', n));
     
     if (global.vmClient && global.vmClient.isolateId) {
       try {
         const res = await global.vmClient.callServiceExtension('ext.teamsoft.ff.getState', {}).catch(() => null);
         if (res && res.valueAsString) updateLastState(JSON.parse(res.valueAsString));
-        const resPage = await global.vmClient.callServiceExtension('ext.teamsoft.page_inspector', {}).catch(() => null);
-        if (resPage && resPage.valueAsString) updateLastState({ type: 'PageState', ...JSON.parse(resPage.valueAsString) });
       } catch (e) { }
     }
     socket.emit('state-snapshot', { ...lastState, ts: Date.now(), isolateId: global.vmClient ? global.vmClient.isolateId : 'disconnected' });
@@ -97,50 +110,131 @@ io.on('connection', (socket) => {
   });
 });
 
+app.post('/api/network-spy', (req, res) => {
+  const data = req.body;
+  let endpoint = data.url;
+  try {
+      const urlObj = new URL(data.url);
+      endpoint = urlObj.pathname.split('/').pop() || urlObj.pathname;
+      if (urlObj.searchParams.has('select')) endpoint += `?select=${urlObj.searchParams.get('select')}`;
+  } catch(e) {}
+
+  // 🚀 ASSINANDO A PÁGINA ATUAL NA REQUISIÇÃO
+  const netData = {
+      endpoint: `${data.method} /${endpoint}`,
+      status: data.status,
+      duration: data.duration,
+      response: data.response,
+      headers: data.headers,
+      type: data.type,
+      ts: data.ts,
+      page: lastState['active_page'] || 'Global Inicialização'
+  };
+  
+  networkHistory.unshift(netData);
+  if (networkHistory.length > 100) networkHistory.pop();
+  io.emit('network-update', netData);
+  res.sendStatus(200);
+});
+
 function updateLastState(data) {
   if (!data) return;
-  if (data.type === 'AppState' || data.variables) {
-    const type = data.type || 'AppState';
-    const vars = data.variables || data;
-    if (type === 'AppState') {
-      if (vars && vars._auth) { lastState['AUTHENTICATION'] = vars._auth; delete vars._auth; }
-      lastState['APPLICATION STATE'] = vars;
-    } else if (type === 'PageState') {
-      if (vars['WIDGET STATE'] || vars['PAGE STATE'] || vars['ACTION OUTPUTS']) {
-        if (vars['WIDGET STATE']) lastState['WIDGET STATE'] = vars['WIDGET STATE'];
-        if (vars['PAGE STATE']) lastState['PAGE STATE'] = vars['PAGE STATE'];
-        if (vars['ACTION OUTPUTS']) lastState['ACTION OUTPUTS'] = { ...lastState['ACTION OUTPUTS'], ...vars['ACTION OUTPUTS'] };
-      } else {
-        lastState['ACTION OUTPUTS'] = { ...lastState['ACTION OUTPUTS'], ...vars };
-        delete lastState['ACTION OUTPUTS']['_ts_updated'];
+
+  if (data.type === 'AppState') {
+      const vars = data.variables || {};
+      if (vars._auth) {
+          lastState['AUTHENTICATION'] = vars._auth;
+          delete vars._auth;
       }
-      if (data.page) lastState['active_page'] = data.page;
-    } else {
-      lastState[type] = vars;
-    }
+      lastState['APPLICATION STATE'] = vars;
+  } else if (data.type === 'MergedPageState') {
+      lastState['WIDGET STATE'] = data['WIDGET STATE'] || {};
+      lastState['PAGE STATE'] = data['PAGE STATE'] || {};
+      lastState['ACTION OUTPUTS'] = data['ACTION OUTPUTS'] || {};
+      lastState['active_page'] = data['active_page'] || 'Unknown';
+  } else if (data.type === 'PageStateV2') {
+      const pageStack = data.pageStack || [];
+      const pagesData = data.pagesData || {};
+      const actionOutputs = data.actionOutputs || {};
+
+      let activePage = pageStack.length > 0 ? pageStack[pageStack.length - 1] : 'Unknown';
+      let combinedWidget = {};
+      let combinedPage = {};
+
+      if (activePage.includes('BottomSheet') || activePage.includes('Dialog') || activePage.includes('Component')) {
+          const parentPage = pageStack.length > 1 ? pageStack[pageStack.length - 2] : null;
+          if (parentPage && pagesData[parentPage]) {
+              Object.assign(combinedWidget, pagesData[parentPage]['WIDGET STATE'] || {});
+              Object.assign(combinedPage, pagesData[parentPage]['PAGE STATE'] || {});
+          }
+      }
+
+      if (pagesData[activePage]) {
+          Object.assign(combinedWidget, pagesData[activePage]['WIDGET STATE'] || {});
+          Object.assign(combinedPage, pagesData[activePage]['PAGE STATE'] || {});
+      }
+
+      let flatActions = {};
+      for (const scope in actionOutputs) {
+          Object.assign(flatActions, actionOutputs[scope]);
+      }
+
+      const now = Date.now();
+      const pageChanged = activePage !== lastActivePage;
+      lastActivePage = activePage;
+      lastState['active_page'] = activePage;
+
+      const applyWithGrace = (key, nextObj, prevObj, bucket) => {
+        const nextHas = Object.keys(nextObj).length > 0;
+        const prevHas = Object.keys(prevObj).length > 0;
+
+        if (nextHas) {
+          lastNonEmptyTs[bucket] = now;
+          lastState[key] = nextObj;
+          return;
+        }
+
+        // Legit empty: allow it after grace period.
+        // When a page changes, we allow empty faster (transition-friendly).
+        const grace = pageChanged ? PAGE_CHANGE_GRACE_MS : EMPTY_GRACE_MS;
+        const sinceNonEmpty = lastNonEmptyTs[bucket] ? (now - lastNonEmptyTs[bucket]) : Number.POSITIVE_INFINITY;
+
+        if (!prevHas) {
+          // Already empty: keep empty.
+          lastState[key] = nextObj;
+          return;
+        }
+
+        if (sinceNonEmpty >= grace) {
+          lastState[key] = nextObj; // clear to empty after grace
+        }
+        // else keep previous non-empty snapshot briefly to prevent flicker
+      };
+
+      applyWithGrace('WIDGET STATE', combinedWidget, lastState['WIDGET STATE'] || {}, 'widget');
+      applyWithGrace('PAGE STATE', combinedPage, lastState['PAGE STATE'] || {}, 'page');
+      applyWithGrace('ACTION OUTPUTS', flatActions, lastState['ACTION OUTPUTS'] || {}, 'actions');
   }
+
+  io.emit('state-snapshot', { ...lastState, ts: Date.now(), isolateId: global.vmClient ? global.vmClient.isolateId : null });
 }
 
 function emit(event, data) {
   if (event === 'state-update') {
     updateLastState(data);
-    io.emit('state-snapshot', { ...lastState, ts: Date.now(), isolateId: global.vmClient ? global.vmClient.isolateId : null });
   } else {
     io.emit(event, data);
   }
 }
 
 function appendLog(entry) {
-  // 🚀 NOVO: Transforma em string limpa e guarda na memória
   const msg = typeof entry === 'object' ? entry.message : entry;
   const lvl = typeof entry === 'object' && entry.level ? entry.level.toUpperCase() : 'INFO';
   const logStr = `[${lvl}] ${msg}`;
   
   console.log(logStr);
-  
   logHistory.push(logStr);
-  if (logHistory.length > 300) logHistory.shift(); // Mantém as últimas 300 linhas
-  
+  if (logHistory.length > 300) logHistory.shift();
   emit('log', logStr);
 }
 
@@ -230,13 +324,11 @@ app.get('/api/pages-tree', (req, res) => {
             }
           }
         }
-        
         if (isComponent) components.push({ route: routeName, file: entry.name, tree: tree });
         else pages.push({ route: routeName, file: entry.name, tree: tree });
       }
     }
   };
-  
   try { scan(libPath); res.json({ pages, components }); } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -278,13 +370,11 @@ app.post('/api/analyze-code', async (req, res) => {
   }
 });
 
-// 🚀 NOVO: CHAT DIRETO COM A IA (Isolado do Linter)
 app.post('/api/chat', async (req, res) => {
   const { message, errorLog } = req.body;
   let fileContent = '';
   let filePath = '';
 
-  // Se o painel mandar um log de erro, a IA caça o arquivo no seu PC
   if (errorLog) {
      const match = errorLog.match(/file:\/\/\/([^\s"']+)/);
      if (match) {
@@ -297,12 +387,12 @@ app.post('/api/chat', async (req, res) => {
   const promptText = message ? message : `O console do Flutter disparou este erro:\n\n\`\`\`text\n${errorLog}\n\`\`\`\nDiga qual é a causa raiz e como consertar. Seja direto.`;
   const context = fileContent ? `\n\nEu fui até o projeto e trouxe o código do arquivo afetado (${path.basename(filePath)}):\n\`\`\`dart\n${fileContent}\n\`\`\`\n` : '';
 
-  // Usa sua chave ou o fallback
-  const apiKey = sandinApiKey || 'AIzaSyBbfelm6AP2hFofaqAlskcfREs-rbuBv6I';
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+  const apiKey = localEnvApiKey || sandinApiKey || 'AIzaSy...';
+  
+// Atualizado para usar o Gemini 2.5 Flash
+const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
   try {
-    // Usamos o fetch nativo do Node.js para garantir que nunca caia no linter offline
     const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -313,20 +403,11 @@ app.post('/api/chat', async (req, res) => {
     });
 
     const data = await response.json();
-
-    if (!response.ok) {
-        throw new Error(data.error?.message || 'Erro desconhecido na API do Gemini');
-    }
-
-    const reply = data.candidates[0].content.parts[0].text;
-    res.json({ analysis: reply });
-  } catch (e) {
-    // Se a IA falhar de verdade, você verá o motivo real!
-    res.json({ analysis: `⚠️ **Falha na Conexão com a IA:**\n\n${e.message}\n\nVerifique se o seu limite de requisições acabou ou se há bloqueio de rede.` });
-  }
+    if (!response.ok) throw new Error(data.error?.message || 'Erro na API do Gemini');
+    res.json({ analysis: data.candidates[0].content.parts[0].text });
+  } catch (e) { res.json({ analysis: `⚠️ **Falha na Conexão com a IA:**\n\n${e.message}` }); }
 });
 
-// ─── ORQUESTRAÇÃO E MENU CLI ─────────────────────────────────────────────
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
 function askForCommand() {
@@ -334,31 +415,26 @@ function askForCommand() {
     console.log('\n🌟 Projetos Recentes (Atalhos):');
     savedCommands.forEach((cmd, idx) => {
       const match = cmd.match(/--project\s+([^\s]+)/);
-      const projName = match ? match[1] : `Comando ${idx + 1}`;
-      console.log(`  [${idx + 1}] ${projName}`);
+      console.log(`  [${idx + 1}] ${match ? match[1] : `Comando ${idx + 1}`}`);
     });
     console.log(`  [0] 🗑️  Limpar histórico`);
   }
 
-  const promptText = savedCommands.length > 0 
-    ? '\n▶ Digite o NÚMERO do atalho OU cole um NOVO comando FF: ' 
-    : '\n▶ Cole o comando do FlutterFlow (ex: flutterflow export-code...): ';
-
-  rl.question(promptText, async (input) => {
+  rl.question(savedCommands.length > 0 ? '\n▶ Digite o NÚMERO ou cole o comando FF: ' : '\n▶ Cole o comando FF: ', async (input) => {
     const trimmed = input.trim();
     if (!trimmed) return askForCommand();
 
     if (trimmed === '0' && savedCommands.length > 0) {
       savedCommands = [];
       persistConfig({ savedCommands: [] });
-      console.log('🧹 Histórico limpo com sucesso!');
+      console.log('🧹 Histórico limpo!');
       return askForCommand();
     }
 
     const num = parseInt(trimmed, 10);
     if (!isNaN(num) && num > 0 && num <= savedCommands.length && !trimmed.startsWith('flutterflow')) {
       const selectedCmd = savedCommands[num - 1];
-      console.log(`\n🚀 Executando atalho [${num}]: ${selectedCmd.substring(0, 60)}...`);
+      console.log(`\n🚀 Executando atalho [${num}]...`);
       saveCommandToHistory(selectedCmd);
       await orchestrate(selectedCmd);
       return;
@@ -368,7 +444,7 @@ function askForCommand() {
       saveCommandToHistory(trimmed);
       await orchestrate(trimmed);
     } else {
-      console.log('⚠️ Comando inválido. Use o atalho numérico ou cole o comando "flutterflow export-code...".');
+      console.log('⚠️ Comando inválido.');
       askForCommand();
     }
   });
@@ -391,16 +467,19 @@ async function orchestrate(command) {
     currentProcess = flutterRunner.run(resolvedPath, {
       onLog: (entry) => appendLog(entry),
       onDebugServiceReady: async ({ port, wsUrl }) => {
+        if (global.vmClient) {
+            console.log(`[Main] 🔄 Trocando conexão VM Service: ${wsUrl}`);
+            global.vmClient.close();
+        }
+
         emit('debug-service-ready', { port, wsUrl });
         const telemetryRouter = new TelemetryRouter((event, data) => emit(event, data), (msg) => appendLog(msg), telemetry);
+        
         global.vmClient = new VmServiceClient(
           wsUrl,
           (streamId, event) => {
              if (streamId === 'Extension' && event.extensionKind === 'teamsoft.state') {
-                 try { emit('state-update', typeof event.extensionData.data === 'string' ? JSON.parse(event.extensionData.data) : event.extensionData.data); } catch (e) {}
-             }
-             if (streamId === 'Extension' && event.extensionKind === 'teamsoft.network') {
-                 try { emit('network-update', typeof event.extensionData.data === 'string' ? JSON.parse(event.extensionData.data) : event.extensionData.data); } catch (e) {}
+                 try { emit('state-update', event.extensionData); } catch (e) {}
              }
              telemetryRouter.routeEvent(streamId, event);
           },
@@ -408,9 +487,17 @@ async function orchestrate(command) {
           (msg) => appendLog(msg),
           (id) => emit('vm-isolate-changed', { isolateId: id })
         );
-        launchDashboard();
+
+        if (!global.dashboardLaunched) {
+            global.dashboardLaunched = true;
+            launchDashboard();
+        }
       },
-      onExit: (code) => { currentProcess = null; askForCommand(); }
+      onExit: (code) => { 
+          currentProcess = null; 
+          global.dashboardLaunched = false;
+          askForCommand(); 
+      }
     });
   } catch (err) { askForCommand(); }
 }
